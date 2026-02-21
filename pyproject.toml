@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slurmgrid"
+version = "0.1.0"
+description = "Manage large Slurm job arrays that exceed cluster submission limits"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.8"
+authors = [
+    { name = "Johann D. Gaebler" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Clustering",
+    "Topic :: System :: Distributed Computing",
+]
+
+[project.scripts]
+slurmgrid = "slurmgrid.cli:main"
+
+[project.urls]
+Repository = "https://github.com/jgaeb/slurmgrid"
