@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import argparse
+import configargparse
 import logging
 import os
 import sys
@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 
 
 def main(argv: Optional[List[str]] = None) -> None:
-    parser = argparse.ArgumentParser(
+    parser = configargparse.ArgumentParser(
         prog="slurmgrid",
         description="Manage large Slurm job arrays that exceed submission limits.",
     )
@@ -49,6 +49,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     # --- submit ---
     p_submit = subparsers.add_parser(
         "submit", help="Submit a new manifest for processing",
+        config_file_parser_class=configargparse.YAMLConfigFileParser,
+    )
+    p_submit.add_argument(
+        "--config", is_config_file=True, metavar="CONFIG_FILE",
+        help="YAML config file; any CLI option can be set here as a key",
     )
     p_submit.add_argument(
         "--manifest", required=True, help="CSV/TSV manifest file",

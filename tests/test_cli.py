@@ -29,6 +29,46 @@ class TestMain(unittest.TestCase):
             main(["--version"])
         self.assertEqual(ctx.exception.code, 0)
 
+    @patch("slurmgrid.cli.get_max_array_size", return_value=1001)
+    def test_yaml_config_file(self, mock_max_array):
+        """Options set in a YAML config file are applied."""
+        manifest = os.path.join(FIXTURES, "sample_manifest.csv")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "run.yaml")
+            with open(config_path, "w") as f:
+                f.write(
+                    f"manifest: {manifest}\n"
+                    f"command: echo {{alpha}}\n"
+                    f"state-dir: {tmpdir}\n"
+                    f"chunk-size: 5\n"
+                    f"dry-run: true\n"
+                )
+            main(["submit", f"--config={config_path}"])
+            self.assertTrue(os.path.isfile(os.path.join(tmpdir, "state.json")))
+            scripts = os.listdir(os.path.join(tmpdir, "scripts"))
+            # 20 rows / 5 per chunk = 4 chunks
+            self.assertEqual(len(scripts), 4)
+
+    @patch("slurmgrid.cli.get_max_array_size", return_value=1001)
+    def test_cli_overrides_yaml_config(self, mock_max_array):
+        """CLI flags take precedence over YAML config file values."""
+        manifest = os.path.join(FIXTURES, "sample_manifest.csv")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "run.yaml")
+            with open(config_path, "w") as f:
+                f.write(
+                    f"manifest: {manifest}\n"
+                    f"command: echo {{alpha}}\n"
+                    f"state-dir: {tmpdir}\n"
+                    f"chunk-size: 5\n"
+                    f"dry-run: true\n"
+                )
+            # Override chunk-size via CLI
+            main(["submit", f"--config={config_path}", "--chunk-size=10"])
+            scripts = os.listdir(os.path.join(tmpdir, "scripts"))
+            # 20 rows / 10 per chunk = 2 chunks (CLI value wins)
+            self.assertEqual(len(scripts), 2)
+
 
 class TestBuildSlurmConfig(unittest.TestCase):
     def test_basic(self):
@@ -127,6 +167,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 preamble_file=None,
                 no_shuffle=False,
                 after_run=None,
+                config=None,
             )
             cmd_submit(args)
 
@@ -169,6 +210,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 preamble_file=None,
                 no_shuffle=False,
                 after_run=None,
+                config=None,
             )
             with self.assertRaises(SystemExit):
                 cmd_submit(args)
@@ -198,6 +240,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 preamble_file=None,
                 no_shuffle=False,
                 after_run=None,
+                config=None,
             )
             with self.assertRaises(SystemExit):
                 cmd_submit(args)
@@ -230,6 +273,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 preamble_file=None,
                 no_shuffle=False,
                 after_run=None,
+                config=None,
             )
             cmd_submit(args)
             mock_max_array.assert_called_once()
