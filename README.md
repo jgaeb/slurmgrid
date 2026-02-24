@@ -18,11 +18,12 @@ parameter manifest, submits array jobs via `sbatch`, monitors completion via
 pip install slurmgrid
 ```
 
-Or just clone the repo and run directly (no dependencies beyond Python 3.8+):
+Or clone the repo and install in editable mode:
 
 ```bash
 git clone https://github.com/jgaeb/slurmgrid.git
 cd slurmgrid
+pip install -e .
 python -m slurmgrid --help
 ```
 
@@ -139,8 +140,9 @@ Inspect the generated scripts in `./sc_state/scripts/` to verify correctness.
    call with a `%throttle` suffix to limit concurrency, which is orders of
    magnitude faster than submitting jobs individually.
 
-4. **Monitoring**: The tool polls `sacct` to track job status. One chunk runs
-   at a time; when it finishes, the next is submitted.
+4. **Monitoring**: The tool polls `sacct` to track job status. Multiple chunks
+   run concurrently as capacity allows (up to `--max-concurrent` total tasks);
+   new chunks are submitted as running ones complete.
 
 5. **Retries**: When all regular chunks are done, failed tasks are batched
    into a single retry chunk and resubmitted, up to `--max-retries` per task.
@@ -198,10 +200,12 @@ sc_state/
 | `--preamble` | | Shell commands before the main command |
 | `--preamble-file` | | File containing preamble commands |
 | `--extra-sbatch` | | Extra `#SBATCH` flags (repeatable) |
+| `--after-run` | | Wait for a previous run to finish before submitting (path to its state directory) |
+| `--config` | | YAML config file; any option above can be set as a key |
 
 ## Requirements
 
-- Python 3.8+ (stdlib only, no external dependencies)
+- Python 3.8+
 - Slurm with `sbatch`, `sacct`, `squeue`, `scancel`, `scontrol` available
 - Slurm accounting enabled (`sacct` must work)
 
