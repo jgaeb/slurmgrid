@@ -15,6 +15,7 @@ from slurmgrid.monitor import (
     _submit_chunk,
     _submit_to_fill,
     _update_single_chunk,
+    _wait_for_upstream,
     run,
 )
 from slurmgrid.script import (
@@ -24,7 +25,7 @@ from slurmgrid.script import (
     write_sbatch_script,
 )
 from slurmgrid.slurm import SlurmError, TaskState, TaskStatus
-from slurmgrid.state import ChunkState, new_state, save_state
+from slurmgrid.state import ChunkState, new_state, save_state, load_state
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -233,6 +234,115 @@ class TestRunLoop(unittest.TestCase):
 
         final = run(state, config)
         # Should not crash, just exit due to max_runtime
+
+
+class TestWaitForUpstream(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.upstream_dir = tempfile.mkdtemp()
+        self.config = RunConfig(
+            manifest=os.path.join(FIXTURES, "sample_manifest.csv"),
+            command="echo {alpha}",
+            state_dir=self.tmpdir,
+            chunk_size=5,
+            max_concurrent=10,
+            max_retries=0,
+            poll_interval=0,
+            after_run=self.upstream_dir,
+            slurm=SlurmConfig(),
+        )
+
+    def _make_upstream_state(self, done=False):
+        state = new_state(5, 5, 10, 0)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        if done:
+            state.mark_submitted("chunk_000", "999")
+            state.mark_completed("chunk_000")
+            state.chunks["chunk_000"].completed_tasks = 5
+        save_state(state, self.upstream_dir)
+        return state
+
+    @patch("slurmgrid.monitor.time.sleep")
+    def test_returns_immediately_when_done(self, mock_sleep):
+        self._make_upstream_state(done=True)
+        _wait_for_upstream(self.config)
+        mock_sleep.assert_not_called()
+
+    @patch("slurmgrid.monitor.time.sleep")
+    def test_polls_until_done(self, mock_sleep):
+        upstream = self._make_upstream_state(done=False)
+
+        call_count = [0]
+        def complete_on_second_call(_):
+            call_count[0] += 1
+            if call_count[0] >= 1:
+                upstream.mark_submitted("chunk_000", "999")
+                upstream.mark_completed("chunk_000")
+                save_state(upstream, self.upstream_dir)
+        mock_sleep.side_effect = complete_on_second_call
+
+        _wait_for_upstream(self.config)
+        self.assertEqual(mock_sleep.call_count, 1)
+
+    @patch("slurmgrid.monitor.time.sleep")
+    def test_handles_unreadable_state(self, mock_sleep):
+        """If the upstream state file is temporarily unreadable, keep polling."""
+        upstream = self._make_upstream_state(done=False)
+
+        call_count = [0]
+        def fix_on_second_call(_):
+            call_count[0] += 1
+            if call_count[0] >= 1:
+                upstream.mark_submitted("chunk_000", "999")
+                upstream.mark_completed("chunk_000")
+                save_state(upstream, self.upstream_dir)
+        mock_sleep.side_effect = fix_on_second_call
+
+        # Corrupt the state file temporarily, then fix it on first sleep
+        import json
+        state_path = os.path.join(self.upstream_dir, "state.json")
+        with open(state_path, "w") as f:
+            f.write("not valid json")
+
+        # The first read will fail; the sleep side effect will write a valid state
+        _wait_for_upstream(self.config)
+        self.assertGreaterEqual(mock_sleep.call_count, 1)
+
+    @patch("slurmgrid.monitor.time.sleep")
+    @patch("slurmgrid.monitor.slurm")
+    def test_run_waits_for_upstream_before_submitting(self, mock_slurm, mock_sleep):
+        """run() should not submit any chunks until upstream is done."""
+        upstream = self._make_upstream_state(done=False)
+
+        # Set up a minimal runnable state for the current run
+        state = new_state(5, 5, 10, 0)
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        with open(os.path.join(scripts_dir, "chunk_000.sh"), "w") as f:
+            f.write("#!/bin/bash\necho hi\n")
+        save_state(state, self.tmpdir)
+
+        mock_slurm.sbatch.return_value = "101"
+        mock_slurm.sacct_query.return_value = {}
+
+        sleep_count = [0]
+        def complete_upstream_then_exit(_):
+            sleep_count[0] += 1
+            if sleep_count[0] == 1:
+                # Complete upstream on first sleep (during _wait_for_upstream)
+                upstream.mark_submitted("chunk_000", "999")
+                upstream.mark_completed("chunk_000")
+                save_state(upstream, self.upstream_dir)
+            else:
+                raise GracefulExit()
+        mock_sleep.side_effect = complete_upstream_then_exit
+
+        self.config.max_runtime = None
+        run(state, self.config)
+
+        # sbatch should have been called after upstream completed
+        mock_slurm.sbatch.assert_called_once()
 
 
 class TestInstallSignalHandlers(unittest.TestCase):
