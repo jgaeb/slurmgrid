@@ -87,6 +87,12 @@ jobs:
           docker compose -f /tmp/slurm-docker/docker-compose.yml \
             cp . slurmctld:/opt/slurmgrid
 
+      - name: Install slurmgrid dependencies in container
+        working-directory: /tmp/slurm-docker
+        run: |
+          docker compose exec -T slurmctld \
+            pip3 install -e /opt/slurmgrid
+
       - name: Run integration tests
         working-directory: /tmp/slurm-docker
         run: |
