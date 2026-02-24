@@ -80,10 +80,11 @@ class TestFullCycle(unittest.TestCase):
             return jid
         mock_slurm.sbatch.side_effect = fake_sbatch
 
-        # Submit initial batch — one chunk at a time
+        # Submit initial batch — fills to max_concurrent: both chunk_000 and
+        # chunk_001 submitted at once (7 + 7 = 14 == max_concurrent)
         _submit_to_fill(state, self.config)
-        self.assertEqual(mock_slurm.sbatch.call_count, 1)
-        self.assertEqual(state.active_job_count(), 7)
+        self.assertEqual(mock_slurm.sbatch.call_count, 2)
+        self.assertEqual(state.active_job_count(), 14)
 
         # Mock sacct: all tasks completed successfully
         def fake_sacct(job_ids):
@@ -98,17 +99,13 @@ class TestFullCycle(unittest.TestCase):
             return result
         mock_slurm.sacct_query.side_effect = fake_sacct
 
-        # First poll: chunk 0 completes, chunk 1 gets submitted
+        # First poll: chunks 0 and 1 complete together, chunk 2 gets submitted
         _poll_once(state, self.config)
         self.assertEqual(state.chunks["chunk_000"].status, "completed")
-        self.assertEqual(state.chunks["chunk_001"].status, "submitted")
-
-        # Second poll: chunk 1 completes, chunk 2 gets submitted
-        _poll_once(state, self.config)
         self.assertEqual(state.chunks["chunk_001"].status, "completed")
         self.assertEqual(state.chunks["chunk_002"].status, "submitted")
 
-        # Third poll: chunk 2 completes
+        # Second poll: chunk 2 completes, run is done
         _poll_once(state, self.config)
         self.assertEqual(state.chunks["chunk_002"].status, "completed")
         self.assertTrue(state.is_done())
@@ -126,9 +123,9 @@ class TestFullCycle(unittest.TestCase):
             return jid
         mock_slurm.sbatch.side_effect = fake_sbatch
 
-        # One chunk at a time
+        # Fills to max_concurrent: chunk_000 and chunk_001 submitted together
         _submit_to_fill(state, self.config)
-        self.assertEqual(mock_slurm.sbatch.call_count, 1)
+        self.assertEqual(mock_slurm.sbatch.call_count, 2)
 
         # Mock sacct: tasks 3 and 4 in chunk_000 fail
         def fake_sacct(job_ids):
@@ -149,19 +146,15 @@ class TestFullCycle(unittest.TestCase):
             return result
         mock_slurm.sacct_query.side_effect = fake_sacct
 
-        # Poll: chunk_000 partial failure, chunk_001 submitted next
+        # Poll: chunk_000 partial failure, chunk_001 completed, chunk_002 submitted
         # (retries are deferred until all regular chunks are done)
         _poll_once(state, self.config)
         self.assertEqual(state.chunks["chunk_000"].status, "partial_failure")
+        self.assertEqual(state.chunks["chunk_001"].status, "completed")
         self.assertEqual(len(state.failures), 2)
-        # No retry chunk yet — regular chunks take priority
+        # No retry chunk yet — chunk_002 is still pending
         retry_chunks = [c for c in state.chunks if "retry" in c]
         self.assertEqual(len(retry_chunks), 0)
-        self.assertEqual(state.chunks["chunk_001"].status, "submitted")
-
-        # Poll: chunk_001 completes, chunk_002 submitted
-        _poll_once(state, self.config)
-        self.assertEqual(state.chunks["chunk_001"].status, "completed")
         self.assertEqual(state.chunks["chunk_002"].status, "submitted")
 
         # Poll: chunk_002 completes, now retry batch is created and submitted
