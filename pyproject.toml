@@ -9,6 +9,10 @@ description = "Manage large Slurm job arrays that exceed cluster submission limi
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.8"
+dependencies = [
+    "configargparse",
+    "pyyaml",
+]
 authors = [
     { name = "Johann D. Gaebler" },
 ]
