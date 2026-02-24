@@ -193,26 +193,32 @@ def _update_single_chunk(
 
 
 def _submit_to_fill(state: State, config: RunConfig) -> None:
-    """Submit the next pending chunk if no chunks are currently active.
+    """Submit pending chunks to fill available task capacity.
 
-    Only one chunk is active at a time. Slurm's array %throttle controls
-    how many tasks run simultaneously within the chunk.
+    Submits chunks until adding another would exceed max_concurrent total
+    active tasks. Always submits at least one chunk if none are active
+    (ensures forward progress). For example, with max_concurrent=10000
+    and chunk_size=5000, up to 2 chunks run simultaneously.
 
     If no regular chunks are pending but there are retriable failures,
-    batch them into a single retry chunk and submit it.
+    batch them into retry chunks and submit those (only when all active
+    chunks have finished to avoid premature retries).
     """
-    if state.active_chunks():
-        return
     pending = state.pending_chunks()
-    if pending:
-        _submit_chunk(pending[0], state, config)
-        return
+    if not pending and not state.active_chunks():
+        # No regular pending chunks and nothing active — try retry batches.
+        _create_retry_batch(state, config)
+        pending = state.pending_chunks()
 
-    # No pending chunks — create a retry batch from accumulated failures
-    _create_retry_batch(state, config)
-    pending = state.pending_chunks()
-    if pending:
-        _submit_chunk(pending[0], state, config)
+    while pending:
+        active_tasks = state.active_job_count()
+        next_chunk = pending[0]
+        # Always submit if nothing is active (ensures forward progress).
+        # Otherwise only submit if we have remaining capacity.
+        if active_tasks > 0 and active_tasks + next_chunk.size > config.max_concurrent:
+            break
+        _submit_chunk(next_chunk, state, config)
+        pending = state.pending_chunks()
 
 
 def _create_retry_batch(state: State, config: RunConfig) -> None:
