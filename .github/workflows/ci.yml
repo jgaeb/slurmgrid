@@ -91,7 +91,9 @@ jobs:
         working-directory: /tmp/slurm-docker
         run: |
           docker compose exec -T slurmctld \
-            pip3 install -e /opt/slurmgrid
+            python3 -m ensurepip --upgrade
+          docker compose exec -T slurmctld \
+            python3 -m pip install -e /opt/slurmgrid
 
       - name: Run integration tests
         working-directory: /tmp/slurm-docker
