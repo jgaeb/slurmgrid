@@ -126,6 +126,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 preamble=None,
                 preamble_file=None,
                 no_shuffle=False,
+                after_run=None,
             )
             cmd_submit(args)
 
@@ -167,6 +168,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 job_name_prefix="sc", extra_sbatch=[], preamble=None,
                 preamble_file=None,
                 no_shuffle=False,
+                after_run=None,
             )
             with self.assertRaises(SystemExit):
                 cmd_submit(args)
@@ -195,6 +197,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 job_name_prefix="sc", extra_sbatch=[], preamble=None,
                 preamble_file=None,
                 no_shuffle=False,
+                after_run=None,
             )
             with self.assertRaises(SystemExit):
                 cmd_submit(args)
@@ -226,6 +229,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 job_name_prefix="sc", extra_sbatch=[], preamble=None,
                 preamble_file=None,
                 no_shuffle=False,
+                after_run=None,
             )
             cmd_submit(args)
             mock_max_array.assert_called_once()

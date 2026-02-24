@@ -390,6 +390,164 @@ def test_status_command(project_dir):
     return True
 
 
+def test_after_run(project_dir):
+    """Test: stage 2 waits for a still-running stage 1 before submitting."""
+    log("=" * 60)
+    log("TEST: after_run")
+    log("=" * 60)
+
+    tmpdir = make_shared_dir("test_after_run")
+    manifest1 = os.path.join(tmpdir, "manifest1.csv")
+    manifest2 = os.path.join(tmpdir, "manifest2.csv")
+    state_dir1 = os.path.join(tmpdir, "state1")
+    state_dir2 = os.path.join(tmpdir, "state2")
+
+    # Stage 1: 4 jobs that each sleep for a few seconds so stage 1 is still
+    # running when stage 2 starts.
+    create_manifest(manifest1, 4)
+    create_manifest(manifest2, 4)
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = project_dir
+    stage1_cmd = [
+        sys.executable, "-m", "slurmgrid", "submit",
+        "--manifest", manifest1,
+        "--command", "sleep 8 && echo done idx={idx}",
+        "--state-dir", state_dir1,
+        "--chunk-size", "5",
+        "--max-concurrent", "10",
+        "--max-retries", "0",
+        "--max-runtime", "180",
+        "--poll-interval", "5",
+        "--time", "00:05:00",
+    ]
+    log(f"Starting stage 1 in background: {' '.join(stage1_cmd)}")
+    stage1_proc = subprocess.Popen(
+        stage1_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=env,
+    )
+
+    # Wait for stage 1 to create its state file (meaning it has been submitted)
+    log("Waiting for stage 1 state file to appear...")
+    state1_json = os.path.join(state_dir1, "state.json")
+    for _ in range(60):
+        if os.path.isfile(state1_json):
+            break
+        time.sleep(1)
+    else:
+        log("FAIL: stage 1 state file never appeared")
+        stage1_proc.kill()
+        return False
+
+    # Confirm stage 1 is not yet done
+    state1_snapshot = load_state(state_dir1)
+    if all(c["status"] in ("completed", "partial_failure")
+           for c in state1_snapshot["chunks"].values()):
+        log("WARN: stage 1 finished before stage 2 could start — "
+            "try increasing sleep duration")
+        # This isn't a hard failure of the feature, just a race; carry on.
+
+    log("Stage 1 is running; starting stage 2 with --after-run")
+
+    # Stage 2 blocks until stage 1 is done, then runs its own jobs
+    result = run_slurmgrid(project_dir, [
+        "submit",
+        "--manifest", manifest2,
+        "--command", "echo stage2 idx={idx}",
+        "--state-dir", state_dir2,
+        "--chunk-size", "5",
+        "--max-concurrent", "10",
+        "--max-retries", "0",
+        "--max-runtime", "300",
+        "--poll-interval", "5",
+        "--time", "00:05:00",
+        "--after-run", state_dir1,
+    ])
+
+    # Also wait for the stage 1 background process to finish
+    try:
+        stdout1, stderr1 = stage1_proc.communicate(timeout=60)
+        for line in (stdout1 + stderr1).splitlines():
+            log(f"  stage1: {line}")
+    except subprocess.TimeoutExpired:
+        stage1_proc.kill()
+        log("FAIL: stage 1 background process timed out")
+        return False
+
+    if result.returncode != 0:
+        log("FAIL: stage 2 exited with non-zero")
+        _dump_debug_info(state_dir2)
+        return False
+    if stage1_proc.returncode != 0:
+        log(f"FAIL: stage 1 exited with non-zero ({stage1_proc.returncode})")
+        _dump_debug_info(state_dir1)
+        return False
+
+    state1 = load_state(state_dir1)
+    state2 = load_state(state_dir2)
+
+    completed1 = sum(1 for c in state1["chunks"].values()
+                     if c["status"] == "completed")
+    completed2 = sum(1 for c in state2["chunks"].values()
+                     if c["status"] == "completed")
+
+    log(f"Stage 1: {completed1}/{len(state1['chunks'])} chunks completed")
+    log(f"Stage 2: {completed2}/{len(state2['chunks'])} chunks completed")
+
+    if completed1 != len(state1["chunks"]):
+        log("FAIL: stage 1 did not fully complete")
+        return False
+    if completed2 != len(state2["chunks"]):
+        log("FAIL: stage 2 did not fully complete")
+        return False
+    if state2.get("failures"):
+        log("FAIL: stage 2 had unexpected failures")
+        return False
+
+    # Verify ordering: stage 2 must not have submitted until stage 1 was done.
+    # Compare sacct End times for stage 1 jobs against stage 2's submitted_at.
+    stage1_job_ids = [
+        c["slurm_job_id"] for c in state1["chunks"].values()
+        if c.get("slurm_job_id")
+    ]
+    stage2_submitted_at = min(
+        c["submitted_at"] for c in state2["chunks"].values()
+        if c.get("submitted_at")
+    )
+    log(f"Stage 2 first submitted_at: {stage2_submitted_at}")
+
+    if stage1_job_ids:
+        sacct_result = subprocess.run(
+            ["sacct", "--jobs=" + ",".join(stage1_job_ids),
+             "--format=JobID,End", "--parsable2", "--noheader"],
+            capture_output=True, text=True,
+        )
+        ordering_ok = True
+        for line in sacct_result.stdout.splitlines():
+            parts = line.strip().rstrip("|").split("|")
+            if len(parts) < 2:
+                continue
+            job_id, end_time = parts[0], parts[1]
+            # Skip batch/extern steps; only check array tasks (JobID contains _)
+            if "_" not in job_id:
+                continue
+            if not end_time or end_time in ("Unknown", "None"):
+                continue
+            # Both timestamps are UTC ISO; strip timezone suffix for comparison
+            end_norm = end_time.replace("T", " ")
+            sub_norm = stage2_submitted_at[:19].replace("T", " ")
+            log(f"  stage1 task {job_id} ended {end_norm}, stage2 submitted {sub_norm}")
+            if end_norm > sub_norm:
+                log(f"FAIL: stage 1 task {job_id} ended AFTER stage 2 submitted")
+                ordering_ok = False
+        if not ordering_ok:
+            return False
+        log("Ordering verified: all stage 1 jobs ended before stage 2 submitted")
+
+    log("PASS")
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -413,6 +571,7 @@ def main():
         test_status_command,
         test_basic_submit_and_complete,
         test_failure_and_retry,
+        test_after_run,
     ]
 
     results = {}

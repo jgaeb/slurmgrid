@@ -27,6 +27,7 @@ from .state import (
     ChunkState,
     FailureRecord,
     State,
+    load_state,
     save_state,
 )
 
@@ -46,6 +47,10 @@ def run(state: State, config: RunConfig) -> State:
     start_time = time.monotonic()
 
     try:
+        # Wait for upstream dependency if specified
+        if config.after_run:
+            _wait_for_upstream(config)
+
         # Initial submission to fill available slots
         _submit_to_fill(state, config)
         save_state(state, config.state_dir)
@@ -76,6 +81,26 @@ def run(state: State, config: RunConfig) -> State:
                  config.state_dir)
 
     return state
+
+
+def _wait_for_upstream(config: RunConfig) -> None:
+    """Poll the upstream state directory until that run reports done."""
+    log.info("Waiting for upstream run at %s to complete...", config.after_run)
+    while True:
+        try:
+            prev = load_state(config.after_run)
+            if prev.is_done():
+                log.info("Upstream run complete, proceeding.")
+                return
+            s = prev.summary()
+            log.info(
+                "Upstream: %d/%d completed, %d active, %d pending",
+                s["completed_tasks"], s["total_jobs"],
+                s["active_tasks"], s["pending_tasks"],
+            )
+        except (OSError, ValueError) as e:
+            log.warning("Could not read upstream state: %s", e)
+        time.sleep(config.poll_interval)
 
 
 def _poll_once(state: State, config: RunConfig) -> None:

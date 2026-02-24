@@ -80,6 +80,7 @@ class RunConfig:
     max_runtime: Optional[int] = None  # Seconds; None means no limit
     dry_run: bool = False
     shuffle: bool = True
+    after_run: Optional[str] = None  # State dir of a run to wait for
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
 
     @property

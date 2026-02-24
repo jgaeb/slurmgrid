@@ -90,6 +90,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     p_submit.add_argument("--no-shuffle", action="store_true",
                           help="Don't shuffle manifest rows before chunking "
                                "(default: shuffle for balanced chunks)")
+    p_submit.add_argument(
+        "--after-run", default=None, metavar="STATE_DIR",
+        help="Wait for a previous run to finish before submitting "
+             "(path to its state directory)",
+    )
     _add_slurm_args(p_submit)
 
     # --- resume ---
@@ -187,6 +192,11 @@ def cmd_submit(args: argparse.Namespace) -> None:
         log.error("Use 'resume' to continue, or choose a different --state-dir")
         sys.exit(1)
 
+    after_run = os.path.abspath(args.after_run) if args.after_run else None
+    if after_run and not state_exists(after_run):
+        log.error("--after-run state directory not found: %s", after_run)
+        sys.exit(1)
+
     # Resolve manifest path to absolute (it's referenced from sbatch scripts)
     manifest_path = os.path.abspath(args.manifest)
 
@@ -203,6 +213,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         max_runtime=args.max_runtime,
         dry_run=args.dry_run,
         shuffle=not args.no_shuffle,
+        after_run=after_run,
         slurm=slurm_config,
     )
 
