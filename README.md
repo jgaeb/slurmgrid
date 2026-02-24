@@ -83,6 +83,32 @@ python -m slurmgrid submit \
 The `--command` template uses `{column_name}` placeholders that are resolved
 from the manifest columns. Any column in the manifest can be referenced.
 
+### Use a config file
+
+Instead of a long command line, you can store submit options in a YAML file:
+
+```yaml
+# run.yaml
+manifest: params.csv
+command: python train.py --alpha {alpha} --beta {beta} --seed {seed}
+state-dir: ./my_run
+partition: gpu
+time: 02:00:00
+mem: 8G
+max-concurrent: 5000
+max-retries: 3
+```
+
+```bash
+python -m slurmgrid submit --config run.yaml
+```
+
+CLI flags take precedence over config file values, so you can override individual options ad hoc:
+
+```bash
+python -m slurmgrid submit --config run.yaml --partition debug --time 00:10:00
+```
+
 ### Resume an interrupted run
 
 If you lose your SSH session or Ctrl-C out, running Slurm jobs continue
