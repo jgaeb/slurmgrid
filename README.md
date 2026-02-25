@@ -192,8 +192,11 @@ Inspect the generated scripts in `./sc_state/scripts/` to verify correctness.
    magnitude faster than submitting jobs individually.
 
 4. **Monitoring**: The tool polls `sacct` to track job status. Multiple chunks
-   run concurrently as capacity allows (up to `--max-concurrent` total tasks);
-   new chunks are submitted as running ones complete.
+   run concurrently: a new chunk is submitted whenever the number of remaining
+   (incomplete) tasks across active chunks drops enough to fit another chunk
+   within `--max-concurrent`. Use `--serial-chunks` to run one chunk at a time
+   instead, which is useful when tasks compete for an external resource (e.g.,
+   API rate limits) beyond what Slurm's `%throttle` controls.
 
 5. **Retries**: When all regular chunks are done, failed tasks are batched
    into a single retry chunk and resubmitted, up to `--max-retries` per task.
@@ -254,6 +257,7 @@ sc_state/
 | `--extra-sbatch` | | Extra `#SBATCH` flags (repeatable) |
 | `--after-run` | | Wait for a previous run to finish before submitting (path to its state directory) |
 | `--self-resubmit` | false | On `--max-runtime` exit, automatically sbatch a new resume job |
+| `--serial-chunks` | false | Submit one chunk at a time (wait for full completion before submitting the next) |
 | `--config` | | YAML config file; any option above can be set as a key |
 
 ## Requirements

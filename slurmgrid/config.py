@@ -82,6 +82,7 @@ class RunConfig:
     shuffle: bool = True
     after_run: Optional[str] = None  # State dir of a run to wait for
     self_resubmit: bool = False  # Resubmit as a new Slurm job on max_runtime exit
+    serial_chunks: bool = False  # Submit one chunk at a time (for rate-limited workloads)
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
 
     @property

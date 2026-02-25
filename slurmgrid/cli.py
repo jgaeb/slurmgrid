@@ -105,6 +105,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="When --max-runtime is hit, automatically resubmit a resume job "
              "so monitoring continues without manual intervention",
     )
+    p_submit.add_argument(
+        "--serial-chunks", action="store_true",
+        help="Submit one chunk at a time; wait for it to fully complete before "
+             "submitting the next. Use when tasks compete for an external resource "
+             "(e.g., API rate limits) beyond what Slurm's %%throttle controls",
+    )
     _add_slurm_args(p_submit)
 
     # --- resume ---
@@ -229,6 +235,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         shuffle=not args.no_shuffle,
         after_run=after_run,
         self_resubmit=args.self_resubmit,
+        serial_chunks=args.serial_chunks,
         slurm=slurm_config,
     )
 

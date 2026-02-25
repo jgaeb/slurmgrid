@@ -303,10 +303,15 @@ def _update_single_chunk(
 def _submit_to_fill(state: State, config: RunConfig) -> None:
     """Submit pending chunks to fill available task capacity.
 
-    Submits chunks until adding another would exceed max_concurrent total
-    active tasks. Always submits at least one chunk if none are active
-    (ensures forward progress). For example, with max_concurrent=10000
-    and chunk_size=5000, up to 2 chunks run simultaneously.
+    By default, submits chunks as long as active remaining tasks +
+    next_chunk.size <= max_concurrent, always submitting at least one if
+    nothing is active. "Remaining tasks" counts only incomplete tasks in
+    active chunks, so capacity opens up as tasks finish within a chunk
+    rather than waiting for an entire chunk to complete.
+
+    With --serial-chunks, only one chunk is active at a time. Use this
+    when tasks compete for an external resource (e.g., API rate limits)
+    where the Slurm %throttle alone isn't sufficient.
 
     If no regular chunks are pending but there are retriable failures,
     batch them into retry chunks and submit those (only when all active
@@ -319,6 +324,8 @@ def _submit_to_fill(state: State, config: RunConfig) -> None:
         pending = state.pending_chunks()
 
     while pending:
+        if config.serial_chunks and state.active_chunks():
+            break
         active_tasks = state.active_job_count()
         next_chunk = pending[0]
         # Always submit if nothing is active (ensures forward progress).

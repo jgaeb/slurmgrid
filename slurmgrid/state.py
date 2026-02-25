@@ -86,8 +86,8 @@ class State:
         ]
 
     def active_job_count(self) -> int:
-        """Total number of in-flight tasks across all active chunks."""
-        return sum(c.size for c in self.active_chunks())
+        """Remaining (incomplete) tasks across all active chunks."""
+        return sum(c.size - c.completed_tasks for c in self.active_chunks())
 
     def is_done(self) -> bool:
         """True if all chunks are completed or permanently failed."""
