@@ -442,7 +442,6 @@ class TestSelfResubmit(unittest.TestCase):
         self.assertIn("--partition=gpu", flags)
         self.assertIn("--time=02:00:00", flags)
         self.assertIn("--account=mylab", flags)
-        self.assertIn("--mem=1G", flags)
         self.assertIn("--cpus-per-task=1", flags)
 
     @patch("slurmgrid.monitor.time.sleep")

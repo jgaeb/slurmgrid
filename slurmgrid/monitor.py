@@ -103,7 +103,6 @@ def _self_resubmit(config: RunConfig) -> None:
         f" --self-resubmit"
     )
     flags = [
-        "--mem=1G",
         "--cpus-per-task=1",
         f"--job-name={config.slurm.job_name_prefix}_monitor",
     ]
