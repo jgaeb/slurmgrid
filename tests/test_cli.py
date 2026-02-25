@@ -167,6 +167,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 preamble_file=None,
                 no_shuffle=False,
                 after_run=None,
+                self_resubmit=False,
                 config=None,
             )
             cmd_submit(args)
@@ -210,6 +211,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 preamble_file=None,
                 no_shuffle=False,
                 after_run=None,
+                self_resubmit=False,
                 config=None,
             )
             with self.assertRaises(SystemExit):
@@ -240,6 +242,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 preamble_file=None,
                 no_shuffle=False,
                 after_run=None,
+                self_resubmit=False,
                 config=None,
             )
             with self.assertRaises(SystemExit):
@@ -273,6 +276,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 preamble_file=None,
                 no_shuffle=False,
                 after_run=None,
+                self_resubmit=False,
                 config=None,
             )
             cmd_submit(args)
@@ -371,6 +375,7 @@ class TestCmdResume(unittest.TestCase):
 
             args = argparse.Namespace(
                 state_dir=tmpdir, poll_interval=5, max_runtime=60,
+                self_resubmit=False,
             )
             cmd_resume(args)
             mock_monitor.assert_called_once()

@@ -145,6 +145,19 @@ def sbatch(script_path: str) -> str:
     return job_id
 
 
+def sbatch_wrap(wrap_cmd: str, sbatch_flags: List[str]) -> str:
+    """Submit a job via sbatch --wrap. Returns the Slurm job ID."""
+    result = _run_command(
+        ["sbatch", "--parsable"] + sbatch_flags + [f"--wrap={wrap_cmd}"],
+        "sbatch --wrap",
+    )
+    job_id = result.stdout.strip().split(";")[0]
+    if not job_id.isdigit():
+        raise SlurmError(f"Unexpected sbatch output: {result.stdout.strip()}")
+    log.info("Submitted monitor job -> job %s", job_id)
+    return job_id
+
+
 def sacct_query(job_ids: List[str]) -> Dict[str, TaskStatus]:
     """Query sacct for array task statuses.
 

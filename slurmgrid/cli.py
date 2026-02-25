@@ -100,6 +100,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Wait for a previous run to finish before submitting "
              "(path to its state directory)",
     )
+    p_submit.add_argument(
+        "--self-resubmit", action="store_true",
+        help="When --max-runtime is hit, automatically resubmit a resume job "
+             "so monitoring continues without manual intervention",
+    )
     _add_slurm_args(p_submit)
 
     # --- resume ---
@@ -111,6 +116,10 @@ def main(argv: Optional[List[str]] = None) -> None:
                           help="Override poll interval")
     p_resume.add_argument("--max-runtime", type=int, default=None,
                           help="Max seconds to run before saving state and exiting")
+    p_resume.add_argument(
+        "--self-resubmit", action="store_true",
+        help="When --max-runtime is hit, automatically resubmit a resume job",
+    )
 
     # --- status ---
     p_status = subparsers.add_parser(
@@ -219,6 +228,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         dry_run=args.dry_run,
         shuffle=not args.no_shuffle,
         after_run=after_run,
+        self_resubmit=args.self_resubmit,
         slurm=slurm_config,
     )
 
@@ -316,6 +326,8 @@ def cmd_resume(args: argparse.Namespace) -> None:
         config.poll_interval = args.poll_interval
     if args.max_runtime is not None:
         config.max_runtime = args.max_runtime
+    if args.self_resubmit:
+        config.self_resubmit = True
 
     state = load_state(state_dir)
     log.info("Resumed run from %s", state_dir)

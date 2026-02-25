@@ -81,6 +81,7 @@ class RunConfig:
     dry_run: bool = False
     shuffle: bool = True
     after_run: Optional[str] = None  # State dir of a run to wait for
+    self_resubmit: bool = False  # Resubmit as a new Slurm job on max_runtime exit
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
 
     @property
