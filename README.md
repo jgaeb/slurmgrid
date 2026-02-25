@@ -109,6 +109,31 @@ CLI flags take precedence over config file values, so you can override individua
 python -m slurmgrid submit --config run.yaml --partition debug --time 00:10:00
 ```
 
+### Run the monitor as a Slurm job (recommended for HPC)
+
+On clusters where login node processes can be killed, submit the monitor
+itself as a low-resource batch job. Use `--max-runtime` slightly under
+the wall time and `--self-resubmit` to chain automatically:
+
+```bash
+sbatch --partition=gpu --time=03:00:00 --mem=1G -c 1 \
+  --wrap="python -m slurmgrid submit \
+    --config run.yaml \
+    --max-runtime 10000 \
+    --self-resubmit"
+```
+
+When `--max-runtime` is reached, slurmgrid saves state and submits a new
+`slurmgrid resume` job before exiting, so monitoring continues unattended
+until the run is complete.
+
+To find or kill a running monitor at any time:
+
+```bash
+cat ./my_run/monitor.lock   # prints hostname:pid
+ssh <hostname> kill <pid>
+```
+
 ### Resume an interrupted run
 
 If you lose your SSH session or Ctrl-C out, running Slurm jobs continue
@@ -183,7 +208,8 @@ Inspect the generated scripts in `./sc_state/scripts/` to verify correctness.
 sc_state/
   config.json          # Frozen copy of the submission configuration
   state.json           # Chunk-level status and failure tracking
-  slurmgrid.log         # Tool's own log file
+  monitor.lock         # hostname:pid of the running monitor (removed on clean exit)
+  slurmgrid.log        # Tool's own log file
   chunks/
     chunk_000.chunk    # Sub-manifests (internal format)
     chunk_001.chunk
@@ -227,6 +253,7 @@ sc_state/
 | `--preamble-file` | | File containing preamble commands |
 | `--extra-sbatch` | | Extra `#SBATCH` flags (repeatable) |
 | `--after-run` | | Wait for a previous run to finish before submitting (path to its state directory) |
+| `--self-resubmit` | false | On `--max-runtime` exit, automatically sbatch a new resume job |
 | `--config` | | YAML config file; any option above can be set as a key |
 
 ## Requirements
