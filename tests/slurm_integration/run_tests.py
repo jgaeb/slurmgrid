@@ -548,6 +548,107 @@ def test_after_run(project_dir):
     return True
 
 
+def test_self_resubmit(project_dir):
+    """Test: --self-resubmit causes a new monitor job to be submitted on max_runtime."""
+    log("=" * 60)
+    log("TEST: self_resubmit")
+    log("=" * 60)
+
+    tmpdir = make_shared_dir("test_self_resubmit")
+    manifest = os.path.join(tmpdir, "manifest.csv")
+    state_dir = os.path.join(tmpdir, "state")
+    # Jobs sleep long enough that the first monitor hits max_runtime before they finish
+    create_manifest(manifest, 6)
+
+    # Submit in a background process with a short max_runtime and --self-resubmit.
+    # The monitor will hit max_runtime, submit a resume job, and exit.
+    env = os.environ.copy()
+    env["PYTHONPATH"] = project_dir
+    cmd = [sys.executable, "-m", "slurmgrid", "submit",
+           "--manifest", manifest,
+           "--command", "sleep 15 && echo done idx={idx}",
+           "--state-dir", state_dir,
+           "--chunk-size", "3",
+           "--max-concurrent", "6",
+           "--max-retries", "0",
+           "--max-runtime", "10",
+           "--poll-interval", "3",
+           "--time", "00:05:00",
+           "--self-resubmit"]
+    log(f"Submitting with --self-resubmit: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+
+    # Wait for the initial monitor to exit (it should within ~15s)
+    try:
+        stdout, stderr = proc.communicate(timeout=60)
+        for line in (stdout + stderr).splitlines():
+            log(f"  monitor: {line}")
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        log("FAIL: initial monitor did not exit within 60s")
+        return False
+
+    if proc.returncode != 0:
+        log(f"FAIL: initial monitor exited with non-zero ({proc.returncode})")
+        return False
+
+    # The initial monitor should have submitted a resume job — find it in sacct
+    log("Waiting for resume job to appear in sacct...")
+    resume_job_id = None
+    for _ in range(30):
+        time.sleep(2)
+        result = subprocess.run(
+            ["squeue", "--format=%i|%j", "--noheader"],
+            capture_output=True, text=True,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.strip().split("|")
+            if len(parts) >= 2 and "_monitor" in parts[1]:
+                resume_job_id = parts[0]
+                log(f"Found resume job {resume_job_id} ({parts[1]})")
+                break
+        if resume_job_id:
+            break
+
+    if not resume_job_id:
+        # Maybe it already completed — check sacct
+        result = subprocess.run(
+            ["sacct", "--format=JobID,JobName,State", "--parsable2", "--noheader",
+             "--starttime=now-1hour"],
+            capture_output=True, text=True,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.strip().split("|")
+            if len(parts) >= 2 and "_monitor" in parts[1]:
+                resume_job_id = parts[0]
+                log(f"Resume job already completed: {resume_job_id} ({parts[1]})")
+                break
+
+    if not resume_job_id:
+        log("FAIL: no resume job found in squeue or sacct")
+        return False
+
+    # Wait for the run to complete (the resume job monitors and finishes it)
+    log("Waiting for run to complete...")
+    for _ in range(60):
+        time.sleep(5)
+        if not os.path.exists(os.path.join(state_dir, "state.json")):
+            continue
+        state = load_state(state_dir)
+        completed = sum(1 for c in state["chunks"].values()
+                        if c["status"] == "completed")
+        total = len(state["chunks"])
+        log(f"  {completed}/{total} chunks completed")
+        if completed == total:
+            log("PASS")
+            return True
+
+    log("FAIL: run did not complete within timeout")
+    _dump_debug_info(state_dir)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -572,6 +673,7 @@ def main():
         test_basic_submit_and_complete,
         test_failure_and_retry,
         test_after_run,
+        test_self_resubmit,
     ]
 
     results = {}

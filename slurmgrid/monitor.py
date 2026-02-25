@@ -5,7 +5,10 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import shlex
 import signal
+import socket
+import sys
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -44,7 +47,9 @@ def run(state: State, config: RunConfig) -> State:
     Returns the final state when all work is done or a signal is caught.
     """
     _install_signal_handlers()
+    _write_lockfile(config.state_dir)
     start_time = time.monotonic()
+    max_runtime_hit = False
 
     try:
         # Wait for upstream dependency if specified
@@ -64,6 +69,7 @@ def run(state: State, config: RunConfig) -> State:
                     "Max runtime of %ds reached, saving state and exiting",
                     config.max_runtime,
                 )
+                max_runtime_hit = True
                 break
 
             time.sleep(config.poll_interval)
@@ -73,14 +79,91 @@ def run(state: State, config: RunConfig) -> State:
 
     except GracefulExit:
         log.info("Caught shutdown signal, saving state and exiting")
+    finally:
+        _remove_lockfile(config.state_dir)
 
     save_state(state, config.state_dir)
     if not state.is_done():
-        log.info("State saved. Running Slurm jobs will continue independently.")
-        log.info("Resume with: python -m slurmgrid resume --state-dir %s",
-                 config.state_dir)
+        if config.self_resubmit and max_runtime_hit:
+            _self_resubmit(config)
+        else:
+            log.info("State saved. Running Slurm jobs will continue independently.")
+            log.info("Resume with: python -m slurmgrid resume --state-dir %s",
+                     config.state_dir)
 
     return state
+
+
+def _self_resubmit(config: RunConfig) -> None:
+    """Submit a new monitor job to continue this run."""
+    resume_cmd = (
+        f"{sys.executable} -m slurmgrid resume"
+        f" --state-dir {shlex.quote(config.state_dir)}"
+        f" --max-runtime {config.max_runtime}"
+        f" --self-resubmit"
+    )
+    flags = [
+        "--cpus-per-task=1",
+        f"--job-name={config.slurm.job_name_prefix}_monitor",
+    ]
+    if config.slurm.partition:
+        flags.append(f"--partition={config.slurm.partition}")
+    if config.slurm.time:
+        flags.append(f"--time={config.slurm.time}")
+    if config.slurm.account:
+        flags.append(f"--account={config.slurm.account}")
+
+    try:
+        job_id = slurm.sbatch_wrap(resume_cmd, flags)
+        log.info("Resubmitted monitor as Slurm job %s", job_id)
+    except slurm.SlurmError as e:
+        log.error("Failed to resubmit monitor: %s", e)
+        log.info("Resume manually with: python -m slurmgrid resume --state-dir %s",
+                 config.state_dir)
+
+
+def _write_lockfile(state_dir: str) -> None:
+    """Write hostname:pid to state_dir/monitor.lock."""
+    lockfile = os.path.join(state_dir, "monitor.lock")
+    hostname = socket.gethostname()
+    pid = os.getpid()
+
+    if os.path.exists(lockfile):
+        try:
+            with open(lockfile) as f:
+                existing_host, existing_pid_str = f.read().strip().split(":", 1)
+            existing_pid = int(existing_pid_str)
+            if existing_host == hostname:
+                try:
+                    os.kill(existing_pid, 0)
+                    log.warning(
+                        "Monitor may already be running on %s (PID %d). "
+                        "If that process is gone, delete %s and retry.",
+                        hostname, existing_pid, lockfile,
+                    )
+                except ProcessLookupError:
+                    log.info("Removing stale lockfile (PID %d no longer exists)",
+                             existing_pid)
+            else:
+                log.warning(
+                    "Monitor may already be running on %s (PID %d). "
+                    "If that process is gone, delete %s and retry.",
+                    existing_host, existing_pid, lockfile,
+                )
+        except (ValueError, OSError):
+            pass  # Malformed or unreadable — overwrite it
+
+    with open(lockfile, "w") as f:
+        f.write(f"{hostname}:{pid}\n")
+    log.info("Monitor running on %s (PID %d)", hostname, pid)
+
+
+def _remove_lockfile(state_dir: str) -> None:
+    """Remove the monitor lockfile on clean exit."""
+    try:
+        os.remove(os.path.join(state_dir, "monitor.lock"))
+    except OSError:
+        pass
 
 
 def _wait_for_upstream(config: RunConfig) -> None:

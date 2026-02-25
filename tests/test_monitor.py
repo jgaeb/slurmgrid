@@ -12,10 +12,13 @@ from slurmgrid.monitor import (
     GracefulExit,
     _install_signal_handlers,
     _log_progress,
+    _remove_lockfile,
+    _self_resubmit,
     _submit_chunk,
     _submit_to_fill,
     _update_single_chunk,
     _wait_for_upstream,
+    _write_lockfile,
     run,
 )
 from slurmgrid.script import (
@@ -343,6 +346,148 @@ class TestWaitForUpstream(unittest.TestCase):
 
         # sbatch should have been called after upstream completed
         mock_slurm.sbatch.assert_called_once()
+
+
+class TestLockfile(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def test_lockfile_written_and_removed(self):
+        """Lockfile is created on write and deleted on remove."""
+        _write_lockfile(self.tmpdir)
+        lockfile = os.path.join(self.tmpdir, "monitor.lock")
+        self.assertTrue(os.path.exists(lockfile))
+        content = open(lockfile).read().strip()
+        host, pid = content.split(":")
+        self.assertEqual(int(pid), os.getpid())
+        _remove_lockfile(self.tmpdir)
+        self.assertFalse(os.path.exists(lockfile))
+
+    def test_remove_lockfile_tolerates_missing(self):
+        """_remove_lockfile does not raise if file is absent."""
+        _remove_lockfile(self.tmpdir)  # No error
+
+    def test_stale_lockfile_overwritten(self):
+        """A lockfile with a dead PID is silently overwritten."""
+        import socket
+        lockfile = os.path.join(self.tmpdir, "monitor.lock")
+        # Write a lockfile with a PID that definitely doesn't exist
+        with open(lockfile, "w") as f:
+            f.write(f"{socket.gethostname()}:999999999\n")
+        _write_lockfile(self.tmpdir)
+        content = open(lockfile).read().strip()
+        _, pid = content.split(":")
+        self.assertEqual(int(pid), os.getpid())
+        _remove_lockfile(self.tmpdir)
+
+    @patch("slurmgrid.monitor.time.sleep")
+    @patch("slurmgrid.monitor.slurm.sacct_query")
+    @patch("slurmgrid.monitor.slurm.sbatch")
+    def test_lockfile_removed_on_graceful_exit(
+        self, mock_sbatch, mock_sacct, mock_sleep
+    ):
+        """Lockfile is cleaned up even when GracefulExit is raised."""
+        tmpdir = tempfile.mkdtemp()
+        config = RunConfig(
+            manifest=os.path.join(FIXTURES, "sample_manifest.csv"),
+            command="echo {alpha}",
+            state_dir=tmpdir,
+            chunk_size=5,
+            max_concurrent=10,
+            max_retries=0,
+            poll_interval=1,
+            slurm=SlurmConfig(),
+        )
+        scripts_dir = os.path.join(tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        state = new_state(5, 5, 10, 0)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        with open(os.path.join(scripts_dir, "chunk_000.sh"), "w") as f:
+            f.write("#!/bin/bash\necho hi\n")
+        save_state(state, tmpdir)
+
+        mock_sbatch.return_value = "100"
+        mock_sleep.side_effect = GracefulExit()
+
+        run(state, config)
+        self.assertFalse(os.path.exists(os.path.join(tmpdir, "monitor.lock")))
+
+
+class TestSelfResubmit(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.config = RunConfig(
+            manifest=os.path.join(FIXTURES, "sample_manifest.csv"),
+            command="echo {alpha}",
+            state_dir=self.tmpdir,
+            chunk_size=5,
+            max_concurrent=10,
+            max_retries=0,
+            poll_interval=1,
+            max_runtime=1,
+            self_resubmit=True,
+            slurm=SlurmConfig(partition="gpu", time="02:00:00", account="mylab"),
+        )
+
+    @patch("slurmgrid.monitor.slurm.sbatch_wrap")
+    def test_self_resubmit_calls_sbatch_wrap(self, mock_wrap):
+        """_self_resubmit passes resume command and minimal flags to sbatch_wrap."""
+        mock_wrap.return_value = "42"
+        _self_resubmit(self.config)
+        mock_wrap.assert_called_once()
+        wrap_cmd, flags = mock_wrap.call_args[0]
+        self.assertIn("slurmgrid resume", wrap_cmd)
+        self.assertIn(self.tmpdir, wrap_cmd)
+        self.assertIn("--self-resubmit", wrap_cmd)
+        self.assertIn("--partition=gpu", flags)
+        self.assertIn("--time=02:00:00", flags)
+        self.assertIn("--account=mylab", flags)
+        self.assertIn("--cpus-per-task=1", flags)
+
+    @patch("slurmgrid.monitor.time.sleep")
+    @patch("slurmgrid.monitor.slurm.sacct_query")
+    @patch("slurmgrid.monitor.slurm.sbatch_wrap")
+    @patch("slurmgrid.monitor.slurm.sbatch")
+    def test_run_self_resubmits_on_max_runtime(
+        self, mock_sbatch, mock_wrap, mock_sacct, mock_sleep
+    ):
+        """run() calls sbatch_wrap to resubmit when max_runtime is hit."""
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        state = new_state(5, 5, 10, 0)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        with open(os.path.join(scripts_dir, "chunk_000.sh"), "w") as f:
+            f.write("#!/bin/bash\necho hi\n")
+        save_state(state, self.tmpdir)
+
+        mock_sbatch.return_value = "100"
+        mock_wrap.return_value = "101"
+        mock_sacct.return_value = {}
+
+        run(state, self.config)
+        mock_wrap.assert_called_once()
+
+    @patch("slurmgrid.monitor.time.sleep")
+    @patch("slurmgrid.monitor.slurm.sacct_query")
+    @patch("slurmgrid.monitor.slurm.sbatch_wrap")
+    @patch("slurmgrid.monitor.slurm.sbatch")
+    def test_no_resubmit_on_graceful_exit(
+        self, mock_sbatch, mock_wrap, mock_sacct, mock_sleep
+    ):
+        """run() does NOT resubmit when killed by a signal."""
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        state = new_state(5, 5, 10, 0)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        with open(os.path.join(scripts_dir, "chunk_000.sh"), "w") as f:
+            f.write("#!/bin/bash\necho hi\n")
+        save_state(state, self.tmpdir)
+
+        mock_sbatch.return_value = "100"
+        mock_sleep.side_effect = GracefulExit()
+
+        run(state, self.config)
+        mock_wrap.assert_not_called()
 
 
 class TestInstallSignalHandlers(unittest.TestCase):
