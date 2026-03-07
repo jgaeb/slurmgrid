@@ -72,6 +72,7 @@ class TaskState(Enum):
         return self in (
             TaskState.FAILED,
             TaskState.TIMEOUT,
+            TaskState.CANCELLED,
             TaskState.NODE_FAIL,
             TaskState.OUT_OF_MEMORY,
         )

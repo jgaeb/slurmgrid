@@ -381,11 +381,12 @@ def cmd_cancel(args: argparse.Namespace) -> None:
     print(f"Cancelling {len(job_ids)} Slurm jobs: {', '.join(job_ids)}")
     slurm_mod.scancel(job_ids)
 
-    # Update state
+    # Update state — mark as cancelled (not completed) so resume can reprocess
     for chunk in active:
-        state.mark_completed(chunk.chunk_id)
+        state.mark_cancelled(chunk.chunk_id)
     save_state(state, state_dir)
     print("Done. Jobs cancelled and state updated.")
+    print("Use 'slurmgrid resume' to resubmit cancelled chunks.")
 
 
 def _print_summary(state: State) -> None:

@@ -16,6 +16,7 @@ from slurmgrid.monitor import (
     _self_resubmit,
     _submit_chunk,
     _submit_to_fill,
+    _update_chunk_statuses,
     _update_single_chunk,
     _wait_for_upstream,
     _write_lockfile,
@@ -115,7 +116,8 @@ class TestUpdateSingleChunk(unittest.TestCase):
         # Should remain submitted
         self.assertEqual(chunk.status, "submitted")
 
-    def test_cancelled_task(self):
+    def test_cancelled_task_is_retriable(self):
+        """CANCELLED tasks are recorded as retriable failures."""
         state = new_state(5, 5, 10, 1)
         state.add_chunk("chunk_000", 2, {"0": 0, "1": 1})
         state.mark_submitted("chunk_000", "100")
@@ -127,8 +129,10 @@ class TestUpdateSingleChunk(unittest.TestCase):
         }
         _update_single_chunk(chunk, "100", statuses, state)
         self.assertEqual(chunk.status, "partial_failure")
-        # Cancelled tasks are not recorded as failures
-        self.assertEqual(len(state.failures), 0)
+        # Cancelled task is recorded as a retriable failure
+        self.assertEqual(len(state.failures), 1)
+        self.assertIn("1", state.failures)
+        self.assertFalse(state.failures["1"].permanently_failed)
 
 
 class TestLogProgress(unittest.TestCase):
@@ -205,6 +209,8 @@ class TestRunLoop(unittest.TestCase):
 
         mock_slurm.sbatch.return_value = "100"
         mock_slurm.sacct_query.return_value = {}  # No results yet
+        mock_slurm.squeue_query.return_value = {"100_0": "PENDING"}  # Job still alive
+        mock_slurm.SlurmError = SlurmError
 
         final = run(state, config)
         # Should exit without completing
@@ -445,11 +451,12 @@ class TestSelfResubmit(unittest.TestCase):
         self.assertIn("--cpus-per-task=1", flags)
 
     @patch("slurmgrid.monitor.time.sleep")
+    @patch("slurmgrid.monitor.slurm.squeue_query")
     @patch("slurmgrid.monitor.slurm.sacct_query")
     @patch("slurmgrid.monitor.slurm.sbatch_wrap")
     @patch("slurmgrid.monitor.slurm.sbatch")
     def test_run_self_resubmits_on_max_runtime(
-        self, mock_sbatch, mock_wrap, mock_sacct, mock_sleep
+        self, mock_sbatch, mock_wrap, mock_sacct, mock_squeue, mock_sleep
     ):
         """run() calls sbatch_wrap to resubmit when max_runtime is hit."""
         scripts_dir = os.path.join(self.tmpdir, "scripts")
@@ -463,6 +470,7 @@ class TestSelfResubmit(unittest.TestCase):
         mock_sbatch.return_value = "100"
         mock_wrap.return_value = "101"
         mock_sacct.return_value = {}
+        mock_squeue.return_value = {"100_0": "PENDING"}  # Job still alive
 
         run(state, self.config)
         mock_wrap.assert_called_once()
@@ -488,6 +496,107 @@ class TestSelfResubmit(unittest.TestCase):
 
         run(state, self.config)
         mock_wrap.assert_not_called()
+
+
+class TestSqueueFallback(unittest.TestCase):
+    """Test that jobs gone from both sacct and squeue are detected as cancelled."""
+
+    def test_missing_tasks_synthesized_as_cancelled(self):
+        """When sacct returns nothing and squeue confirms job is gone,
+        tasks should be recorded as retriable failures."""
+        state = new_state(5, 5, 10, 1)
+        state.add_chunk("chunk_000", 2, {"0": 0, "1": 1})
+        state.mark_submitted("chunk_000", "100")
+        config = RunConfig(
+            manifest="/dev/null", command="echo hi",
+            state_dir="/tmp", slurm=SlurmConfig(),
+        )
+
+        with patch("slurmgrid.monitor.slurm.sacct_query") as mock_sacct, \
+             patch("slurmgrid.monitor.slurm.squeue_query") as mock_squeue:
+            # sacct returns nothing
+            mock_sacct.return_value = {}
+            # squeue also returns nothing (job is gone)
+            mock_squeue.return_value = {}
+
+            _update_chunk_statuses(state.active_chunks(), state, config)
+
+        # Both tasks should be recorded as failures
+        self.assertEqual(state.chunks["chunk_000"].status, "partial_failure")
+        self.assertEqual(len(state.failures), 2)
+        for f in state.failures.values():
+            self.assertFalse(f.permanently_failed)
+
+    def test_squeue_still_alive_no_synthesis(self):
+        """When sacct returns nothing but squeue shows the job is alive,
+        do NOT synthesize cancellations."""
+        state = new_state(5, 5, 10, 1)
+        state.add_chunk("chunk_000", 2, {"0": 0, "1": 1})
+        state.mark_submitted("chunk_000", "100")
+        config = RunConfig(
+            manifest="/dev/null", command="echo hi",
+            state_dir="/tmp", slurm=SlurmConfig(),
+        )
+
+        with patch("slurmgrid.monitor.slurm.sacct_query") as mock_sacct, \
+             patch("slurmgrid.monitor.slurm.squeue_query") as mock_squeue:
+            mock_sacct.return_value = {}
+            # squeue shows the job is still pending
+            mock_squeue.return_value = {"100_0": "PENDING", "100_1": "PENDING"}
+
+            _update_chunk_statuses(state.active_chunks(), state, config)
+
+        # Chunk should still be submitted (waiting)
+        self.assertEqual(state.chunks["chunk_000"].status, "submitted")
+        self.assertEqual(len(state.failures), 0)
+
+
+class TestCancelledChunkResume(unittest.TestCase):
+    """Test that cancelled chunks are re-queued on resume."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.manifest = os.path.join(FIXTURES, "sample_manifest.csv")
+
+    @patch("slurmgrid.monitor.slurm")
+    def test_cancelled_chunks_requeued_on_run(self, mock_slurm):
+        """Cancelled chunks transition to pending and get resubmitted."""
+        state = new_state(5, 5, 10, 1)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        state.mark_submitted("chunk_000", "100")
+        state.mark_cancelled("chunk_000")
+
+        # Create script file
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        with open(os.path.join(scripts_dir, "chunk_000.sh"), "w") as f:
+            f.write("#!/bin/bash\necho hi\n")
+        save_state(state, self.tmpdir)
+
+        config = RunConfig(
+            manifest=self.manifest, command="echo {alpha}",
+            state_dir=self.tmpdir, chunk_size=5, max_concurrent=10,
+            max_retries=1, poll_interval=1, slurm=SlurmConfig(),
+        )
+
+        # sbatch returns a new job id; sacct shows all completed
+        mock_slurm.sbatch.return_value = "200"
+        def fake_sacct(job_ids):
+            result = {}
+            for jid in job_ids:
+                for c in state.chunks.values():
+                    if c.slurm_job_id == jid:
+                        for i in range(c.size):
+                            result[f"{jid}_{i}"] = TaskStatus(
+                                state=TaskState.COMPLETED, exit_code=0,
+                            )
+            return result
+        mock_slurm.sacct_query.side_effect = fake_sacct
+
+        final = run(state, config)
+        self.assertTrue(final.is_done())
+        # Should have been resubmitted with a new job ID
+        mock_slurm.sbatch.assert_called_once()
 
 
 class TestInstallSignalHandlers(unittest.TestCase):

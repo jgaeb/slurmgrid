@@ -52,6 +52,15 @@ def run(state: State, config: RunConfig) -> State:
     max_runtime_hit = False
 
     try:
+        # Transition any cancelled chunks back to pending so they get resubmitted
+        for chunk in list(state.chunks.values()):
+            if chunk.status == "cancelled":
+                chunk.status = "pending"
+                chunk.slurm_job_id = None
+                chunk.completed_tasks = 0
+                log.info("Re-queued cancelled chunk %s for resubmission",
+                         chunk.chunk_id)
+
         # Wait for upstream dependency if specified
         if config.after_run:
             _wait_for_upstream(config)
@@ -215,10 +224,45 @@ def _update_chunk_statuses(
         log.warning("sacct query failed, will retry next poll: %s", e)
         return
 
+    # Identify chunks with incomplete sacct results that may need a squeue check
+    need_squeue_check: List[str] = []
     for chunk in active:
         if not chunk.slurm_job_id:
             continue
-        _update_single_chunk(chunk, chunk.slurm_job_id, statuses, state)
+        # Count how many array tasks sacct returned for this chunk
+        found = sum(
+            1 for idx in range(chunk.size)
+            if f"{chunk.slurm_job_id}_{idx}" in statuses
+        )
+        if found < chunk.size:
+            need_squeue_check.append(chunk.slurm_job_id)
+
+    # If any chunks have missing sacct results, check squeue to see if
+    # the jobs are still alive.  If a job is gone from both sacct and
+    # squeue (e.g. cancelled externally via scancel), we treat the
+    # missing tasks as CANCELLED so the monitor doesn't get stuck.
+    squeue_jobs: set = set()
+    if need_squeue_check:
+        try:
+            sq = slurm.squeue_query(need_squeue_check)
+            # squeue_query returns keys like "jobid_arrayidx"; extract
+            # the base job ids that are still present.
+            for key in sq:
+                squeue_jobs.add(key.split("_")[0])
+        except slurm.SlurmError as e:
+            log.warning("squeue fallback failed: %s", e)
+            # Conservative: assume jobs are still alive
+            squeue_jobs = set(need_squeue_check)
+
+    for chunk in active:
+        if not chunk.slurm_job_id:
+            continue
+        job_gone = (
+            chunk.slurm_job_id in need_squeue_check
+            and chunk.slurm_job_id not in squeue_jobs
+        )
+        _update_single_chunk(chunk, chunk.slurm_job_id, statuses, state,
+                             job_gone=job_gone)
 
 
 def _update_single_chunk(
@@ -226,6 +270,8 @@ def _update_single_chunk(
     job_id: str,
     all_statuses: Dict[str, slurm.TaskStatus],
     state: State,
+    *,
+    job_gone: bool = False,
 ) -> None:
     """Update a single chunk's status based on sacct results."""
     # Collect statuses for this chunk's array tasks
@@ -235,9 +281,19 @@ def _update_single_chunk(
         if key in all_statuses:
             chunk_tasks[array_idx] = all_statuses[key]
 
-    if not chunk_tasks:
+    if not chunk_tasks and not job_gone:
         # No sacct results yet — job may still be queued
         return
+
+    # If the job is gone from squeue but sacct doesn't have results for
+    # all tasks, treat the missing ones as CANCELLED.
+    if job_gone:
+        cancelled = slurm.TaskStatus(
+            state=slurm.TaskState.CANCELLED, exit_code=-1,
+        )
+        for array_idx in range(chunk.size):
+            if array_idx not in chunk_tasks:
+                chunk_tasks[array_idx] = cancelled
 
     # Update per-task completion count (for progress reporting)
     succeeded = sum(1 for ts in chunk_tasks.values() if ts.state.is_success)
@@ -291,9 +347,6 @@ def _update_single_chunk(
                 key = str(global_idx)
                 if key in state.failures:
                     del state.failures[key]
-            elif ts.state == slurm.TaskState.CANCELLED:
-                log.warning("Chunk %s task %d was cancelled",
-                            chunk.chunk_id, array_idx)
 
         succeeded = sum(1 for ts in chunk_tasks.values() if ts.state.is_success)
         log.info("Chunk %s finished: %d succeeded, %d failed",

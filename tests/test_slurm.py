@@ -56,7 +56,7 @@ class TestTaskState(unittest.TestCase):
         self.assertTrue(TaskState.NODE_FAIL.is_retriable_failure)
         self.assertTrue(TaskState.OUT_OF_MEMORY.is_retriable_failure)
         self.assertFalse(TaskState.COMPLETED.is_retriable_failure)
-        self.assertFalse(TaskState.CANCELLED.is_retriable_failure)
+        self.assertTrue(TaskState.CANCELLED.is_retriable_failure)
 
 
 class TestRunCommand(unittest.TestCase):
