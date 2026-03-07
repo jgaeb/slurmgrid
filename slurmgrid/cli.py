@@ -126,6 +126,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         "--self-resubmit", action="store_true",
         help="When --max-runtime is hit, automatically resubmit a resume job",
     )
+    p_resume.add_argument(
+        "--reset-failures", action="store_true",
+        help="Reset permanently failed tasks so they can be retried",
+    )
+    _add_slurm_args(p_resume)
 
     # --- status ---
     p_status = subparsers.add_parser(
@@ -200,6 +205,37 @@ def _build_slurm_config(args: argparse.Namespace) -> SlurmConfig:
         extra_sbatch_flags=args.extra_sbatch,
         preamble=preamble,
     )
+
+
+def _compute_slurm_overrides(
+    args: argparse.Namespace, config: RunConfig,
+) -> dict:
+    """Return a dict of Slurm fields that were explicitly overridden on the CLI."""
+    overrides = {}
+    # Map CLI arg names to SlurmConfig field names
+    slurm_fields = [
+        "partition", "time", "mem", "mem_per_cpu", "cpus_per_task",
+        "gpus", "gres", "account", "qos", "constraint", "exclude",
+        "job_name_prefix",
+    ]
+    for field_name in slurm_fields:
+        val = getattr(args, field_name, None)
+        if val is None:
+            continue
+        current = getattr(config.slurm, field_name, None)
+        if str(val) != str(current):
+            overrides[field_name] = str(val)
+    return overrides
+
+
+def _apply_slurm_overrides(config: RunConfig, overrides: dict) -> None:
+    """Apply override values to config.slurm fields."""
+    for field_name, val in overrides.items():
+        current = getattr(config.slurm, field_name, None)
+        if isinstance(current, int):
+            setattr(config.slurm, field_name, int(val))
+        else:
+            setattr(config.slurm, field_name, val)
 
 
 def cmd_submit(args: argparse.Namespace) -> None:
@@ -337,6 +373,26 @@ def cmd_resume(args: argparse.Namespace) -> None:
         config.self_resubmit = True
 
     state = load_state(state_dir)
+
+    # Reset permanently failed tasks if requested
+    if args.reset_failures:
+        reset_count = state.reset_failures()
+        if reset_count > 0:
+            log.info("Reset %d permanently failed tasks for retry "
+                     "(max_retries now %d)", reset_count, state.max_retries)
+            config.max_retries = state.max_retries
+            save_state(state, state_dir)
+        else:
+            log.info("No permanently failed tasks to reset")
+
+    # Compute Slurm parameter overrides from CLI args
+    slurm_overrides = _compute_slurm_overrides(args, config)
+    if slurm_overrides:
+        log.warning("Slurm overrides for this session: %s",
+                    ", ".join(f"{k}={v}" for k, v in sorted(slurm_overrides.items())))
+        _apply_slurm_overrides(config, slurm_overrides)
+        config.slurm_overrides = slurm_overrides
+
     log.info("Resumed run from %s", state_dir)
     _print_summary(state)
 

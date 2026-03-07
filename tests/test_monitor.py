@@ -599,6 +599,92 @@ class TestCancelledChunkResume(unittest.TestCase):
         mock_slurm.sbatch.assert_called_once()
 
 
+class TestSlurmOverridesStamped(unittest.TestCase):
+    """Test that slurm_overrides on RunConfig get stamped onto ChunkState."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.config = RunConfig(
+            manifest=os.path.join(FIXTURES, "sample_manifest.csv"),
+            command="echo {alpha}",
+            state_dir=self.tmpdir,
+            chunk_size=5,
+            max_concurrent=10,
+            max_retries=0,
+            poll_interval=1,
+            slurm=SlurmConfig(time="04:00:00"),
+            slurm_overrides={"time": "04:00:00"},
+        )
+
+    @patch("slurmgrid.monitor.slurm.sbatch")
+    def test_submit_chunk_stamps_overrides(self, mock_sbatch):
+        mock_sbatch.return_value = "100"
+        state = new_state(5, 5, 10, 0)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        with open(os.path.join(scripts_dir, "chunk_000.sh"), "w") as f:
+            f.write("#!/bin/bash\necho hi\n")
+
+        chunk = state.chunks["chunk_000"]
+        _submit_chunk(chunk, state, self.config)
+        self.assertEqual(
+            state.chunks["chunk_000"].slurm_overrides,
+            {"time": "04:00:00"},
+        )
+
+    @patch("slurmgrid.monitor.slurm.sbatch")
+    def test_submit_chunk_no_overrides(self, mock_sbatch):
+        """Without overrides, slurm_overrides stays empty."""
+        mock_sbatch.return_value = "100"
+        self.config.slurm_overrides = {}
+        state = new_state(5, 5, 10, 0)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        with open(os.path.join(scripts_dir, "chunk_000.sh"), "w") as f:
+            f.write("#!/bin/bash\necho hi\n")
+
+        chunk = state.chunks["chunk_000"]
+        _submit_chunk(chunk, state, self.config)
+        self.assertEqual(state.chunks["chunk_000"].slurm_overrides, {})
+
+    @patch("slurmgrid.monitor.slurm")
+    def test_cancelled_chunks_get_overrides_on_resume(self, mock_slurm):
+        """Cancelled chunks should get slurm_overrides stamped when re-queued."""
+        state = new_state(5, 5, 10, 1)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        state.mark_submitted("chunk_000", "100")
+        state.mark_cancelled("chunk_000")
+
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        with open(os.path.join(scripts_dir, "chunk_000.sh"), "w") as f:
+            f.write("#!/bin/bash\necho hi\n")
+        save_state(state, self.tmpdir)
+
+        mock_slurm.sbatch.return_value = "200"
+        def fake_sacct(job_ids):
+            result = {}
+            for jid in job_ids:
+                for c in state.chunks.values():
+                    if c.slurm_job_id == jid:
+                        for i in range(c.size):
+                            result[f"{jid}_{i}"] = TaskStatus(
+                                state=TaskState.COMPLETED, exit_code=0,
+                            )
+            return result
+        mock_slurm.sacct_query.side_effect = fake_sacct
+
+        final = run(state, self.config)
+        self.assertEqual(
+            final.chunks["chunk_000"].slurm_overrides,
+            {"time": "04:00:00"},
+        )
+
+
 class TestInstallSignalHandlers(unittest.TestCase):
     def test_handlers_installed(self):
         _install_signal_handlers()

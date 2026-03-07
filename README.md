@@ -143,6 +143,24 @@ independently. Resume monitoring with:
 python -m slurmgrid resume --state-dir ./my_run
 ```
 
+### Retry permanently failed tasks
+
+If a run finishes with permanently failed tasks (e.g., jobs that timed out),
+you can reset them and retry with different Slurm parameters:
+
+```bash
+python -m slurmgrid resume --state-dir ./my_run \
+  --reset-failures \
+  --time 04:00:00 \
+  --mem 16G
+```
+
+`--reset-failures` clears the `permanently_failed` flag on all failure records
+and bumps `max_retries` so the monitor's retry machinery picks them up. Any
+Slurm flags passed to `resume` override the frozen config for this session
+only — the original `config.json` is not modified. Overrides are recorded
+per-chunk in `state.json` for provenance.
+
 ### Check status
 
 ```bash
@@ -259,6 +277,11 @@ sc_state/
 | `--self-resubmit` | false | On `--max-runtime` exit, automatically sbatch a new resume job |
 | `--serial-chunks` | false | Submit one chunk at a time (wait for full completion before submitting the next) |
 | `--config` | | YAML config file; any option above can be set as a key |
+| `--reset-failures` | false | Reset permanently failed tasks for retry (`resume` only) |
+
+Slurm flags (`--time`, `--mem`, `--partition`, etc.) can also be passed to
+`resume` to override the frozen config for that session. These overrides are
+transient and recorded per-chunk in `state.json`.
 
 ## Requirements
 

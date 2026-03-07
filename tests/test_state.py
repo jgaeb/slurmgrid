@@ -140,6 +140,72 @@ class TestState(unittest.TestCase):
         self.assertFalse(s.is_done())
 
 
+class TestResetFailures(unittest.TestCase):
+    def test_reset_clears_permanently_failed(self):
+        s = new_state(total_jobs=5, chunk_size=5, max_concurrent=5,
+                      max_retries=0)
+        s.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        s.record_failure(0, "chunk_000", 0, 1)
+        s.record_failure(1, "chunk_000", 1, 1)
+        self.assertTrue(s.failures["0"].permanently_failed)
+        self.assertTrue(s.failures["1"].permanently_failed)
+
+        reset_count = s.reset_failures()
+        self.assertEqual(reset_count, 2)
+        self.assertFalse(s.failures["0"].permanently_failed)
+        self.assertFalse(s.failures["1"].permanently_failed)
+
+    def test_reset_bumps_max_retries(self):
+        s = new_state(total_jobs=5, chunk_size=5, max_concurrent=5,
+                      max_retries=1)
+        s.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        # Fail once (retries=0), then fail again (retries=1, permanently_failed)
+        s.record_failure(0, "chunk_000", 0, 1)
+        s.record_failure(0, "retry_000", 0, 1)
+        self.assertTrue(s.failures["0"].permanently_failed)
+        self.assertEqual(s.failures["0"].retries, 1)
+
+        s.reset_failures()
+        # max_retries should be bumped to at least max_retries_seen + 1 = 2
+        self.assertEqual(s.max_retries, 2)
+
+    def test_reset_no_failures_returns_zero(self):
+        s = new_state(total_jobs=5, chunk_size=5, max_concurrent=5,
+                      max_retries=0)
+        self.assertEqual(s.reset_failures(), 0)
+        self.assertEqual(s.max_retries, 0)
+
+    def test_reset_skips_non_permanent_failures(self):
+        s = new_state(total_jobs=5, chunk_size=5, max_concurrent=5,
+                      max_retries=2)
+        s.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        s.record_failure(0, "chunk_000", 0, 1)  # retries=0, not permanent
+        self.assertFalse(s.failures["0"].permanently_failed)
+
+        reset_count = s.reset_failures()
+        self.assertEqual(reset_count, 0)  # Nothing was permanently_failed
+
+
+class TestChunkStateOverrides(unittest.TestCase):
+    def test_slurm_overrides_default_empty(self):
+        cs = ChunkState(chunk_id="chunk_000")
+        self.assertEqual(cs.slurm_overrides, {})
+
+    def test_slurm_overrides_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            s = new_state(total_jobs=5, chunk_size=5, max_concurrent=5,
+                          max_retries=0)
+            s.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+            s.chunks["chunk_000"].slurm_overrides = {"time": "04:00:00"}
+            save_state(s, tmpdir)
+
+            loaded = load_state(tmpdir)
+            self.assertEqual(
+                loaded.chunks["chunk_000"].slurm_overrides,
+                {"time": "04:00:00"},
+            )
+
+
 class TestStatePersistence(unittest.TestCase):
     def test_round_trip(self):
         with tempfile.TemporaryDirectory() as tmpdir:

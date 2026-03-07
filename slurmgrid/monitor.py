@@ -58,6 +58,8 @@ def run(state: State, config: RunConfig) -> State:
                 chunk.status = "pending"
                 chunk.slurm_job_id = None
                 chunk.completed_tasks = 0
+                if config.slurm_overrides:
+                    chunk.slurm_overrides = dict(config.slurm_overrides)
                 log.info("Re-queued cancelled chunk %s for resubmission",
                          chunk.chunk_id)
 
@@ -441,6 +443,8 @@ def _create_retry_batch(state: State, config: RunConfig) -> None:
 
         # Register in state
         state.add_chunk(chunk_id, len(batch_indices), row_mapping)
+        if config.slurm_overrides:
+            state.chunks[chunk_id].slurm_overrides = dict(config.slurm_overrides)
 
         # Generate sbatch script
         chunk_info = ChunkInfo(
@@ -475,6 +479,8 @@ def _submit_chunk(chunk: ChunkState, state: State, config: RunConfig) -> None:
     try:
         job_id = slurm.sbatch(script)
         state.mark_submitted(chunk.chunk_id, job_id)
+        if config.slurm_overrides:
+            state.chunks[chunk.chunk_id].slurm_overrides = dict(config.slurm_overrides)
         log.info("Submitted chunk %s -> Slurm job %s (%d tasks)",
                  chunk.chunk_id, job_id, chunk.size)
     except slurm.SlurmError as e:

@@ -390,6 +390,97 @@ def test_status_command(project_dir):
     return True
 
 
+def test_reset_failures_with_overrides(project_dir):
+    """Test: submit with short --time so jobs TIMEOUT, then resume
+    --reset-failures --time <longer> and verify they complete."""
+    log("=" * 60)
+    log("TEST: reset_failures_with_overrides")
+    log("=" * 60)
+
+    tmpdir = make_shared_dir("test_reset_failures")
+    manifest = os.path.join(tmpdir, "manifest.csv")
+    state_dir = os.path.join(tmpdir, "state")
+    create_manifest(manifest, 4)
+
+    # Submit with a very short --time so jobs will TIMEOUT.
+    # The command sleeps 20s but the time limit is 15s.
+    result = run_slurmgrid(project_dir, [
+        "submit",
+        "--manifest", manifest,
+        "--command", "sleep 20 && echo done idx={idx}",
+        "--state-dir", state_dir,
+        "--chunk-size", "4",
+        "--max-concurrent", "10",
+        "--max-retries", "0",
+        "--max-runtime", "120",
+        "--poll-interval", "5",
+        "--time", "00:00:15",
+    ])
+
+    if result.returncode != 0:
+        log("FAIL: initial submit exited with non-zero")
+        _dump_debug_info(state_dir)
+        return False
+
+    state = load_state(state_dir)
+    perm_failed = sum(
+        1 for f in state.get("failures", {}).values()
+        if f["permanently_failed"]
+    )
+    log(f"Permanently failed after initial run: {perm_failed}")
+
+    if perm_failed == 0:
+        log("FAIL: expected some permanently failed tasks (TIMEOUT)")
+        _dump_debug_info(state_dir)
+        return False
+
+    # Resume with --reset-failures and a longer --time
+    log("Resuming with --reset-failures --time 00:05:00 ...")
+    result = run_slurmgrid(project_dir, [
+        "resume",
+        "--state-dir", state_dir,
+        "--reset-failures",
+        "--time", "00:05:00",
+        "--max-runtime", "180",
+        "--poll-interval", "5",
+    ])
+
+    if result.returncode != 0:
+        log("FAIL: resume exited with non-zero")
+        _dump_debug_info(state_dir)
+        return False
+
+    state = load_state(state_dir)
+    perm_failed_after = sum(
+        1 for f in state.get("failures", {}).values()
+        if f["permanently_failed"]
+    )
+    total_failures = len(state.get("failures", {}))
+    log(f"After resume: {total_failures} failure records, "
+        f"{perm_failed_after} permanently failed")
+
+    if perm_failed_after > 0:
+        log(f"FAIL: {perm_failed_after} tasks still permanently failed")
+        _dump_debug_info(state_dir)
+        return False
+
+    # Check that retry chunks have slurm_overrides recorded
+    retry_chunks = {cid: c for cid, c in state["chunks"].items()
+                    if cid.startswith("retry_")}
+    if retry_chunks:
+        for cid, c in retry_chunks.items():
+            overrides = c.get("slurm_overrides", {})
+            log(f"  Retry chunk {cid}: slurm_overrides={overrides}")
+            if overrides.get("time") != "00:05:00":
+                log(f"FAIL: retry chunk {cid} missing time override")
+                return False
+    else:
+        log("WARN: no retry chunks found (failures may have been cleared)")
+
+    log("PASS")
+    return True
+
+
 def test_after_run(project_dir):
     """Test: stage 2 waits for a still-running stage 1 before submitting."""
     log("=" * 60)
@@ -792,6 +883,7 @@ def main():
         test_basic_submit_and_complete,
         test_failure_and_retry,
         test_cancel_and_resume,
+        test_reset_failures_with_overrides,
         test_after_run,
         test_self_resubmit,
     ]

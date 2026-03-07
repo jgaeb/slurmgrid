@@ -11,7 +11,7 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 
 # Chunk lifecycle: pending -> submitted -> running -> completed
@@ -55,6 +55,8 @@ class ChunkState:
     # Mapping from global manifest row index to the array index in this chunk.
     # Populated at chunking time so we can trace failures back to the original row.
     row_mapping: Dict[str, int] = field(default_factory=dict)
+    # Slurm parameter overrides active when this chunk was submitted (informational).
+    slurm_overrides: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -162,6 +164,25 @@ class State:
                 retries=0,
                 permanently_failed=perm,
             )
+
+    def reset_failures(self) -> int:
+        """Reset permanently failed tasks so they can be retried.
+
+        Clears permanently_failed on all failure records and bumps
+        max_retries high enough that _create_retry_batch will pick them up.
+
+        Returns the number of failures reset.
+        """
+        reset_count = 0
+        max_retries_seen = 0
+        for f in self.failures.values():
+            max_retries_seen = max(max_retries_seen, f.retries)
+            if f.permanently_failed:
+                f.permanently_failed = False
+                reset_count += 1
+        if reset_count > 0:
+            self.max_retries = max(self.max_retries, max_retries_seen + 1)
+        return reset_count
 
     # --- Summary ---
 
