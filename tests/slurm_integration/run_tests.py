@@ -391,8 +391,9 @@ def test_status_command(project_dir):
 
 
 def test_reset_failures_with_overrides(project_dir):
-    """Test: submit with short --time so jobs TIMEOUT, then resume
-    --reset-failures --time <longer> and verify they complete."""
+    """Test: submit jobs that fail permanently (max_retries=0), fix the
+    manifest, then resume --reset-failures with a Slurm override and verify
+    they complete. Also checks that slurm_overrides are recorded on retry chunks."""
     log("=" * 60)
     log("TEST: reset_failures_with_overrides")
     log("=" * 60)
@@ -400,21 +401,21 @@ def test_reset_failures_with_overrides(project_dir):
     tmpdir = make_shared_dir("test_reset_failures")
     manifest = os.path.join(tmpdir, "manifest.csv")
     state_dir = os.path.join(tmpdir, "state")
-    create_manifest(manifest, 4)
 
-    # Submit with a very short --time so jobs will TIMEOUT.
-    # The command sleeps 20s but the time limit is 15s.
+    # 6 jobs; indices 1 and 4 will fail (exit 1)
+    create_failing_manifest(manifest, 6, fail_indices={1, 4})
+
     result = run_slurmgrid(project_dir, [
         "submit",
         "--manifest", manifest,
-        "--command", "sleep 20 && echo done idx={idx}",
+        "--command", "exit {should_fail}",
         "--state-dir", state_dir,
-        "--chunk-size", "4",
+        "--chunk-size", "6",
         "--max-concurrent", "10",
         "--max-retries", "0",
         "--max-runtime", "120",
         "--poll-interval", "5",
-        "--time", "00:00:15",
+        "--time", "00:05:00",
     ])
 
     if result.returncode != 0:
@@ -429,19 +430,25 @@ def test_reset_failures_with_overrides(project_dir):
     )
     log(f"Permanently failed after initial run: {perm_failed}")
 
-    if perm_failed == 0:
-        log("FAIL: expected some permanently failed tasks (TIMEOUT)")
+    if perm_failed != 2:
+        log(f"FAIL: expected 2 permanently failed, got {perm_failed}")
         _dump_debug_info(state_dir)
         return False
 
-    # Resume with --reset-failures and a longer --time
-    log("Resuming with --reset-failures --time 00:05:00 ...")
+    # "Fix" the manifest so previously-failing rows now succeed.
+    # _create_retry_batch re-reads the manifest to build retry chunks,
+    # so the updated values will be picked up.
+    create_failing_manifest(manifest, 6, fail_indices=set())
+
+    # Resume with --reset-failures and a Slurm override (--mem) to verify
+    # overrides are recorded on the retry chunks.
+    log("Resuming with --reset-failures --mem 100M ...")
     result = run_slurmgrid(project_dir, [
         "resume",
         "--state-dir", state_dir,
         "--reset-failures",
-        "--time", "00:05:00",
-        "--max-runtime", "180",
+        "--mem", "100M",
+        "--max-runtime", "120",
         "--poll-interval", "5",
     ])
 
@@ -464,18 +471,26 @@ def test_reset_failures_with_overrides(project_dir):
         _dump_debug_info(state_dir)
         return False
 
+    if total_failures > 0:
+        log(f"FAIL: expected 0 failure records (succeeded on retry), "
+            f"got {total_failures}")
+        _dump_debug_info(state_dir)
+        return False
+
     # Check that retry chunks have slurm_overrides recorded
     retry_chunks = {cid: c for cid, c in state["chunks"].items()
                     if cid.startswith("retry_")}
-    if retry_chunks:
-        for cid, c in retry_chunks.items():
-            overrides = c.get("slurm_overrides", {})
-            log(f"  Retry chunk {cid}: slurm_overrides={overrides}")
-            if overrides.get("time") != "00:05:00":
-                log(f"FAIL: retry chunk {cid} missing time override")
-                return False
-    else:
-        log("WARN: no retry chunks found (failures may have been cleared)")
+    if not retry_chunks:
+        log("FAIL: no retry chunks found")
+        _dump_debug_info(state_dir)
+        return False
+
+    for cid, c in retry_chunks.items():
+        overrides = c.get("slurm_overrides", {})
+        log(f"  Retry chunk {cid}: slurm_overrides={overrides}")
+        if overrides.get("mem") != "100M":
+            log(f"FAIL: retry chunk {cid} missing mem override")
+            return False
 
     log("PASS")
     return True
