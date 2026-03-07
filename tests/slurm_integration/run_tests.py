@@ -390,6 +390,112 @@ def test_status_command(project_dir):
     return True
 
 
+def test_reset_failures_with_overrides(project_dir):
+    """Test: submit jobs that fail permanently (max_retries=0), fix the
+    manifest, then resume --reset-failures with a Slurm override and verify
+    they complete. Also checks that slurm_overrides are recorded on retry chunks."""
+    log("=" * 60)
+    log("TEST: reset_failures_with_overrides")
+    log("=" * 60)
+
+    tmpdir = make_shared_dir("test_reset_failures")
+    manifest = os.path.join(tmpdir, "manifest.csv")
+    state_dir = os.path.join(tmpdir, "state")
+
+    # 6 jobs; indices 1 and 4 will fail (exit 1)
+    create_failing_manifest(manifest, 6, fail_indices={1, 4})
+
+    result = run_slurmgrid(project_dir, [
+        "submit",
+        "--manifest", manifest,
+        "--command", "exit {should_fail}",
+        "--state-dir", state_dir,
+        "--chunk-size", "6",
+        "--max-concurrent", "10",
+        "--max-retries", "0",
+        "--max-runtime", "120",
+        "--poll-interval", "5",
+        "--time", "00:05:00",
+    ])
+
+    if result.returncode != 0:
+        log("FAIL: initial submit exited with non-zero")
+        _dump_debug_info(state_dir)
+        return False
+
+    state = load_state(state_dir)
+    perm_failed = sum(
+        1 for f in state.get("failures", {}).values()
+        if f["permanently_failed"]
+    )
+    log(f"Permanently failed after initial run: {perm_failed}")
+
+    if perm_failed != 2:
+        log(f"FAIL: expected 2 permanently failed, got {perm_failed}")
+        _dump_debug_info(state_dir)
+        return False
+
+    # "Fix" the manifest so previously-failing rows now succeed.
+    # _create_retry_batch re-reads the manifest to build retry chunks,
+    # so the updated values will be picked up.
+    create_failing_manifest(manifest, 6, fail_indices=set())
+
+    # Resume with --reset-failures and a Slurm override (--mem) to verify
+    # overrides are recorded on the retry chunks.
+    log("Resuming with --reset-failures --mem 100M ...")
+    result = run_slurmgrid(project_dir, [
+        "resume",
+        "--state-dir", state_dir,
+        "--reset-failures",
+        "--mem", "100M",
+        "--max-runtime", "120",
+        "--poll-interval", "5",
+    ])
+
+    if result.returncode != 0:
+        log("FAIL: resume exited with non-zero")
+        _dump_debug_info(state_dir)
+        return False
+
+    state = load_state(state_dir)
+    perm_failed_after = sum(
+        1 for f in state.get("failures", {}).values()
+        if f["permanently_failed"]
+    )
+    total_failures = len(state.get("failures", {}))
+    log(f"After resume: {total_failures} failure records, "
+        f"{perm_failed_after} permanently failed")
+
+    if perm_failed_after > 0:
+        log(f"FAIL: {perm_failed_after} tasks still permanently failed")
+        _dump_debug_info(state_dir)
+        return False
+
+    if total_failures > 0:
+        log(f"FAIL: expected 0 failure records (succeeded on retry), "
+            f"got {total_failures}")
+        _dump_debug_info(state_dir)
+        return False
+
+    # Check that retry chunks have slurm_overrides recorded
+    retry_chunks = {cid: c for cid, c in state["chunks"].items()
+                    if cid.startswith("retry_")}
+    if not retry_chunks:
+        log("FAIL: no retry chunks found")
+        _dump_debug_info(state_dir)
+        return False
+
+    for cid, c in retry_chunks.items():
+        overrides = c.get("slurm_overrides", {})
+        log(f"  Retry chunk {cid}: slurm_overrides={overrides}")
+        if overrides.get("mem") != "100M":
+            log(f"FAIL: retry chunk {cid} missing mem override")
+            return False
+
+    log("PASS")
+    return True
+
+
 def test_after_run(project_dir):
     """Test: stage 2 waits for a still-running stage 1 before submitting."""
     log("=" * 60)
@@ -792,6 +898,7 @@ def main():
         test_basic_submit_and_complete,
         test_failure_and_retry,
         test_cancel_and_resume,
+        test_reset_failures_with_overrides,
         test_after_run,
         test_self_resubmit,
     ]

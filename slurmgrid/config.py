@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -84,6 +84,7 @@ class RunConfig:
     self_resubmit: bool = False  # Resubmit as a new Slurm job on max_runtime exit
     serial_chunks: bool = False  # Submit one chunk at a time (for rate-limited workloads)
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
+    slurm_overrides: Dict[str, str] = field(default_factory=dict)  # Transient; not frozen
 
     @property
     def resolved_delimiter(self) -> str:
@@ -135,6 +136,7 @@ def freeze_config(config: RunConfig, state_dir: str) -> None:
     """Write config to state_dir/config.json."""
     path = os.path.join(state_dir, "config.json")
     data = asdict(config)
+    data.pop("slurm_overrides", None)  # Transient; not persisted
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")

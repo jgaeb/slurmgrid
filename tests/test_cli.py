@@ -384,7 +384,12 @@ class TestCmdResume(unittest.TestCase):
 
             args = argparse.Namespace(
                 state_dir=tmpdir, poll_interval=5, max_runtime=60,
-                self_resubmit=False,
+                self_resubmit=False, reset_failures=False,
+                partition=None, time=None, mem=None, mem_per_cpu=None,
+                cpus_per_task=None, gpus=None, gres=None, account=None,
+                qos=None, constraint=None, exclude=None,
+                job_name_prefix=None, extra_sbatch=[], preamble=None,
+                preamble_file=None,
             )
             cmd_resume(args)
             mock_monitor.assert_called_once()
@@ -399,9 +404,102 @@ class TestCmdResume(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             args = argparse.Namespace(
                 state_dir=tmpdir, poll_interval=None, max_runtime=None,
+                self_resubmit=False, reset_failures=False,
+                partition=None, time=None, mem=None, mem_per_cpu=None,
+                cpus_per_task=None, gpus=None, gres=None, account=None,
+                qos=None, constraint=None, exclude=None,
+                job_name_prefix=None, extra_sbatch=[], preamble=None,
+                preamble_file=None,
             )
             with self.assertRaises(SystemExit):
                 cmd_resume(args)
+
+
+class TestCmdResumeResetFailures(unittest.TestCase):
+    def setUp(self):
+        logging.getLogger("slurmgrid").handlers = []
+
+    @patch("slurmgrid.cli.run_monitor")
+    def test_reset_failures_clears_and_bumps(self, mock_monitor):
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = RunConfig(
+                manifest="/dev/null", command="echo hi", state_dir=tmpdir,
+                max_retries=0, slurm=SlurmConfig(),
+            )
+            from slurmgrid.config import freeze_config
+            freeze_config(config, tmpdir)
+
+            state = new_state(5, 5, 10, 0)
+            state.add_chunk("chunk_000", 5, {"0": 0, "1": 1})
+            state.mark_submitted("chunk_000", "123")
+            state.mark_partial_failure("chunk_000")
+            state.record_failure(0, "chunk_000", 0, 1)
+            state.record_failure(1, "chunk_000", 1, 1)
+            save_state(state, tmpdir)
+
+            mock_monitor.return_value = state
+
+            args = argparse.Namespace(
+                state_dir=tmpdir, poll_interval=None, max_runtime=None,
+                self_resubmit=False, reset_failures=True,
+                partition=None, time=None, mem=None, mem_per_cpu=None,
+                cpus_per_task=None, gpus=None, gres=None, account=None,
+                qos=None, constraint=None, exclude=None,
+                job_name_prefix=None, extra_sbatch=[], preamble=None,
+                preamble_file=None,
+            )
+            cmd_resume(args)
+
+            # Verify the config passed to monitor has bumped max_retries
+            call_config = mock_monitor.call_args[0][1]
+            self.assertGreaterEqual(call_config.max_retries, 1)
+
+            # Verify the state passed to monitor has failures reset
+            call_state = mock_monitor.call_args[0][0]
+            for f in call_state.failures.values():
+                self.assertFalse(f.permanently_failed)
+
+
+class TestCmdResumeSlurmOverrides(unittest.TestCase):
+    def setUp(self):
+        logging.getLogger("slurmgrid").handlers = []
+
+    @patch("slurmgrid.cli.run_monitor")
+    def test_slurm_overrides_applied(self, mock_monitor):
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = RunConfig(
+                manifest="/dev/null", command="echo hi", state_dir=tmpdir,
+                slurm=SlurmConfig(time="01:00:00", partition="cpu"),
+            )
+            from slurmgrid.config import freeze_config
+            freeze_config(config, tmpdir)
+
+            state = new_state(5, 5, 10, 1)
+            state.add_chunk("chunk_000", 5, {"0": 0})
+            save_state(state, tmpdir)
+
+            mock_monitor.return_value = state
+
+            args = argparse.Namespace(
+                state_dir=tmpdir, poll_interval=None, max_runtime=None,
+                self_resubmit=False, reset_failures=False,
+                partition=None, time="04:00:00", mem=None, mem_per_cpu=None,
+                cpus_per_task=None, gpus=None, gres=None, account=None,
+                qos=None, constraint=None, exclude=None,
+                job_name_prefix=None, extra_sbatch=[], preamble=None,
+                preamble_file=None,
+            )
+            cmd_resume(args)
+
+            call_config = mock_monitor.call_args[0][1]
+            self.assertEqual(call_config.slurm.time, "04:00:00")
+            self.assertEqual(call_config.slurm_overrides, {"time": "04:00:00"})
+            # Partition was not overridden, so it should remain unchanged
+            self.assertEqual(call_config.slurm.partition, "cpu")
 
 
 class TestPrintSummary(unittest.TestCase):
