@@ -18,7 +18,7 @@ from slurmgrid.cli import (
     main,
 )
 from slurmgrid.config import RunConfig, SlurmConfig
-from slurmgrid.state import State, new_state, save_state
+from slurmgrid.state import State, load_state, new_state, save_state
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -353,6 +353,11 @@ class TestCmdCancel(unittest.TestCase):
                 args = argparse.Namespace(state_dir=tmpdir)
                 cmd_cancel(args)
                 mock_scancel.assert_called_once_with(["456"])
+
+            # Verify chunks are marked as cancelled, not completed
+            reloaded = load_state(tmpdir)
+            self.assertEqual(reloaded.chunks["chunk_000"].status, "cancelled")
+            self.assertFalse(reloaded.is_done())
 
 
 class TestCmdResume(unittest.TestCase):

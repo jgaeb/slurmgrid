@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 # Chunk lifecycle: pending -> submitted -> running -> completed
 #                                                  \-> partial_failure -> (retry chunks created)
 #                              \-> submit_failed -> (retry submission next poll)
+#                              \-> cancelled -> (on resume: transition back to submitted)
 CHUNK_STATUSES = {
     "pending",
     "submitted",
@@ -24,6 +25,7 @@ CHUNK_STATUSES = {
     "completed",
     "partial_failure",
     "submit_failed",
+    "cancelled",
 }
 
 
@@ -90,7 +92,10 @@ class State:
         return sum(c.size - c.completed_tasks for c in self.active_chunks())
 
     def is_done(self) -> bool:
-        """True if all chunks are completed or permanently failed."""
+        """True if all chunks are completed or permanently failed.
+
+        Cancelled chunks are NOT done — they need to be resumed.
+        """
         return all(
             c.status in ("completed", "partial_failure")
             for c in self.chunks.values()
@@ -132,6 +137,9 @@ class State:
 
     def mark_submit_failed(self, chunk_id: str) -> None:
         self.chunks[chunk_id].status = "submit_failed"
+
+    def mark_cancelled(self, chunk_id: str) -> None:
+        self.chunks[chunk_id].status = "cancelled"
 
     def record_failure(self, global_index: int, chunk_id: str,
                        array_index: int, exit_code: int) -> None:

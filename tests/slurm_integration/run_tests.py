@@ -649,6 +649,125 @@ def test_self_resubmit(project_dir):
     return False
 
 
+def test_cancel_and_resume(project_dir):
+    """Test: cancel active jobs, then resume to resubmit and complete them."""
+    log("=" * 60)
+    log("TEST: cancel_and_resume")
+    log("=" * 60)
+
+    tmpdir = make_shared_dir("test_cancel_resume")
+    manifest = os.path.join(tmpdir, "manifest.csv")
+    state_dir = os.path.join(tmpdir, "state")
+    create_manifest(manifest, 6)
+
+    # Submit jobs that sleep long enough for us to cancel them.
+    env = os.environ.copy()
+    env["PYTHONPATH"] = project_dir
+    cmd = [sys.executable, "-m", "slurmgrid", "submit",
+           "--manifest", manifest,
+           "--command", "sleep 30 && echo done idx={idx}",
+           "--state-dir", state_dir,
+           "--chunk-size", "3",
+           "--max-concurrent", "6",
+           "--max-retries", "1",
+           "--max-runtime", "20",
+           "--poll-interval", "3",
+           "--time", "00:05:00"]
+    log(f"Submitting long-running jobs: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+
+    # Wait for state file to appear (jobs have been submitted)
+    state_json = os.path.join(state_dir, "state.json")
+    for _ in range(60):
+        if os.path.isfile(state_json):
+            state = load_state(state_dir)
+            submitted = sum(1 for c in state["chunks"].values()
+                            if c.get("slurm_job_id"))
+            if submitted > 0:
+                break
+        time.sleep(1)
+    else:
+        proc.kill()
+        log("FAIL: jobs never submitted")
+        return False
+
+    log(f"Jobs submitted ({submitted} chunks), waiting for monitor to exit...")
+
+    # Wait for the monitor to exit (via max_runtime)
+    try:
+        stdout, stderr = proc.communicate(timeout=60)
+        for line in (stdout + stderr).splitlines():
+            log(f"  monitor: {line}")
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        log("FAIL: monitor did not exit within 60s")
+        return False
+
+    # Now cancel all active jobs
+    log("Running slurmgrid cancel...")
+    result = run_slurmgrid(project_dir, [
+        "cancel", "--state-dir", state_dir,
+    ])
+    if result.returncode != 0:
+        log("FAIL: cancel command failed")
+        return False
+
+    # Verify state: chunks should be "cancelled", not "completed"
+    state = load_state(state_dir)
+    cancelled = sum(1 for c in state["chunks"].values()
+                    if c["status"] == "cancelled")
+    log(f"Cancelled chunks: {cancelled}")
+    if cancelled == 0:
+        log("FAIL: no chunks marked as cancelled")
+        _dump_debug_info(state_dir)
+        return False
+
+    # Now resume with a fast command (the original sleep 30 command is baked
+    # into the sbatch scripts, so we can't change it). Instead, we verify
+    # that resume picks up the cancelled chunks and resubmits them.
+    # Use a short max_runtime so we don't wait forever for the sleep 30 jobs.
+    log("Running slurmgrid resume...")
+    result = run_slurmgrid(project_dir, [
+        "resume", "--state-dir", state_dir,
+        "--max-runtime", "120",
+        "--poll-interval", "5",
+    ], timeout=180)
+
+    if result.returncode != 0:
+        log("FAIL: resume command failed")
+        _dump_debug_info(state_dir)
+        return False
+
+    # After resume, all chunks should be completed
+    state = load_state(state_dir)
+    completed = sum(1 for c in state["chunks"].values()
+                    if c["status"] == "completed")
+    total = len(state["chunks"])
+    log(f"After resume: {completed}/{total} chunks completed")
+
+    # The original chunks get resubmitted (sleep 30 + echo), plus retry
+    # chunks may be created for tasks that were CANCELLED. Check that
+    # everything eventually finishes.
+    still_cancelled = sum(1 for c in state["chunks"].values()
+                          if c["status"] == "cancelled")
+    if still_cancelled > 0:
+        log(f"FAIL: {still_cancelled} chunks still cancelled after resume")
+        _dump_debug_info(state_dir)
+        return False
+
+    # All original + retry chunks should be in a terminal state
+    non_terminal = sum(1 for c in state["chunks"].values()
+                       if c["status"] not in ("completed", "partial_failure"))
+    if non_terminal > 0:
+        log(f"FAIL: {non_terminal} chunks not in terminal state")
+        _dump_debug_info(state_dir)
+        return False
+
+    log("PASS")
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -672,6 +791,7 @@ def main():
         test_status_command,
         test_basic_submit_and_complete,
         test_failure_and_retry,
+        test_cancel_and_resume,
         test_after_run,
         test_self_resubmit,
     ]
