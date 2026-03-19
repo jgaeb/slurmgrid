@@ -92,10 +92,10 @@ jobs:
           docker compose exec -T slurmctld sacct || true
 
       - name: Copy project into all Slurm containers
-        working-directory: /tmp/slurm-docker
         run: |
-          for container in $(docker compose config --services); do
-            docker compose cp . ${container}:/opt/slurmgrid 2>/dev/null || true
+          for container in $(docker compose -f /tmp/slurm-docker/docker-compose.yml config --services); do
+            docker compose -f /tmp/slurm-docker/docker-compose.yml \
+              cp . ${container}:/opt/slurmgrid 2>/dev/null || true
           done
 
       - name: Install slurmgrid on all Slurm nodes
