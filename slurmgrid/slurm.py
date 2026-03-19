@@ -7,6 +7,7 @@ for testing or adapt to different Slurm versions.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import time
@@ -253,6 +254,28 @@ def scancel(job_ids: List[str]) -> None:
         "scancel",
     )
     log.info("Cancelled jobs: %s", ", ".join(job_ids))
+
+
+def get_user_job_count() -> Optional[int]:
+    """Count total running+pending tasks for the current user across all jobs.
+
+    Returns None if the query fails (callers should treat this as unknown).
+    """
+    user = os.environ.get("USER") or os.environ.get("LOGNAME")
+    if not user:
+        log.warning("Could not determine current user for squeue headroom check")
+        return None
+    try:
+        result = _run_command(
+            ["squeue", "--noheader", f"--user={user}"],
+            "squeue user job count",
+            retries=1,
+        )
+        lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+        return len(lines)
+    except (SlurmError, OSError) as e:
+        log.warning("Could not query user job count: %s", e)
+        return None
 
 
 def get_max_array_size() -> int:

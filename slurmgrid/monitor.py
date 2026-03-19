@@ -13,6 +13,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from . import slurm
+from .slurm import get_user_job_count
 from .config import RunConfig
 from .manifest import (
     CHUNK_DELIMITER,
@@ -378,6 +379,16 @@ def _submit_to_fill(state: State, config: RunConfig) -> None:
         _create_retry_batch(state, config)
         pending = state.pending_chunks()
 
+    # Resolve effective headroom once per call
+    effective_headroom = (
+        config.headroom
+        if config.headroom is not None
+        else min(100, config.max_concurrent // 10)
+    )
+
+    # Query total user tasks once (for headroom check); None means unknown
+    user_task_count = get_user_job_count()
+
     while pending:
         if config.serial_chunks and state.active_chunks():
             break
@@ -386,6 +397,18 @@ def _submit_to_fill(state: State, config: RunConfig) -> None:
         # Always submit if nothing is active (ensures forward progress).
         # Otherwise only submit if we have remaining capacity.
         if active_tasks > 0 and active_tasks + next_chunk.size > config.max_concurrent:
+            break
+        # Headroom check: don't submit if total user tasks are near the limit.
+        if (
+            active_tasks > 0
+            and user_task_count is not None
+            and user_task_count + next_chunk.size > config.max_concurrent - effective_headroom
+        ):
+            log.info(
+                "Slurm queue near capacity (%d user tasks, headroom=%d), "
+                "holding submission",
+                user_task_count, effective_headroom,
+            )
             break
         _submit_chunk(next_chunk, state, config)
         pending = state.pending_chunks()
@@ -484,7 +507,23 @@ def _submit_chunk(chunk: ChunkState, state: State, config: RunConfig) -> None:
         log.info("Submitted chunk %s -> Slurm job %s (%d tasks)",
                  chunk.chunk_id, job_id, chunk.size)
     except slurm.SlurmError as e:
-        log.error("Failed to submit chunk %s: %s", chunk.chunk_id, e)
+        err_str = str(e)
+        # Queue-limit errors are expected and will auto-resolve; log at INFO
+        # level so they don't alarm on-call responders.
+        _QUEUE_LIMIT_PHRASES = (
+            "QOSMaxJobsPerUser",
+            "QOSMaxSubmitJobPerUser",
+            "MaxArraySize",
+            "Batch job submission failed",
+            "Job violates accounting/QOS policy",
+        )
+        if any(phrase in err_str for phrase in _QUEUE_LIMIT_PHRASES):
+            log.info(
+                "Chunk %s submit deferred (queue limit): %s",
+                chunk.chunk_id, err_str,
+            )
+        else:
+            log.error("Failed to submit chunk %s: %s", chunk.chunk_id, e)
         state.mark_submit_failed(chunk.chunk_id)
 
 

@@ -169,6 +169,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 after_run=None,
                 self_resubmit=False,
                 serial_chunks=False,
+                headroom=None,
                 config=None,
             )
             cmd_submit(args)
@@ -214,6 +215,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 after_run=None,
                 self_resubmit=False,
                 serial_chunks=False,
+                headroom=None,
                 config=None,
             )
             with self.assertRaises(SystemExit):
@@ -246,6 +248,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 after_run=None,
                 self_resubmit=False,
                 serial_chunks=False,
+                headroom=None,
                 config=None,
             )
             with self.assertRaises(SystemExit):
@@ -281,6 +284,7 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 after_run=None,
                 self_resubmit=False,
                 serial_chunks=False,
+                headroom=None,
                 config=None,
             )
             cmd_submit(args)

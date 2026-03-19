@@ -111,6 +111,12 @@ def main(argv: Optional[List[str]] = None) -> None:
              "submitting the next. Use when tasks compete for an external resource "
              "(e.g., API rate limits) beyond what Slurm's %%throttle controls",
     )
+    p_submit.add_argument(
+        "--headroom", type=int, default=None, metavar="N",
+        help="Reserved task slots: don't submit if total user Slurm tasks "
+             "would exceed max-concurrent minus headroom "
+             "(default: min(100, max-concurrent // 10))",
+    )
     _add_slurm_args(p_submit)
 
     # --- resume ---
@@ -272,6 +278,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         after_run=after_run,
         self_resubmit=args.self_resubmit,
         serial_chunks=args.serial_chunks,
+        headroom=args.headroom,
         slurm=slurm_config,
     )
 
