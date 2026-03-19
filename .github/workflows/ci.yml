@@ -87,19 +87,21 @@ jobs:
           docker compose exec -T slurmctld sacct || true
 
       - name: Copy project into all Slurm containers
+        working-directory: /tmp/slurm-docker
         run: |
-          for container in slurmctld c1 c2; do
-            docker compose -f /tmp/slurm-docker/docker-compose.yml \
-              cp . ${container}:/opt/slurmgrid
+          for container in $(docker compose config --services); do
+            docker compose cp . ${container}:/opt/slurmgrid 2>/dev/null || true
           done
 
       - name: Install slurmgrid on all Slurm nodes
         working-directory: /tmp/slurm-docker
         run: |
-          for container in slurmctld c1 c2; do
-            docker compose exec -T ${container} python3 -m ensurepip --upgrade
-            docker compose exec -T ${container} python3 -m pip install -e /opt/slurmgrid
+          for container in $(docker compose config --services); do
+            docker compose exec -T ${container} python3 -m ensurepip --upgrade 2>/dev/null || true
+            docker compose exec -T ${container} python3 -m pip install -e /opt/slurmgrid 2>/dev/null || true
           done
+          # Verify install on the controller (required)
+          docker compose exec -T slurmctld python3 -m slurmgrid --version
 
       - name: Run integration tests
         working-directory: /tmp/slurm-docker
