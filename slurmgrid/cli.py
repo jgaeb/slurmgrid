@@ -457,6 +457,8 @@ def _print_summary(state: State) -> None:
     else:
         print()
     print(f"  Active:            {s['active_tasks']:>8}")
+    if s.get("failing_active", 0) > 0:
+        print(f"  Failing (active):  {s['failing_active']:>8}")
     print(f"  Pending:           {s['pending_tasks']:>8}")
     print(f"  Failed (retrying): {s['failed_retry']:>8}")
     print(f"  Failed (final):    {s['failed_final']:>8}")

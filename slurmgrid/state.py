@@ -52,6 +52,9 @@ class ChunkState:
     size: int = 0
     # Number of tasks that completed successfully so far (updated each poll).
     completed_tasks: int = 0
+    # Number of tasks that have definitively failed so far (updated each poll,
+    # purely for display — does not drive retry logic).
+    failed_tasks: int = 0
     # Mapping from global manifest row index to the array index in this chunk.
     # Populated at chunking time so we can trace failures back to the original row.
     row_mapping: Dict[str, int] = field(default_factory=dict)
@@ -91,21 +94,23 @@ class State:
 
     def active_job_count(self) -> int:
         """Remaining (incomplete) tasks across all active chunks."""
-        return sum(c.size - c.completed_tasks for c in self.active_chunks())
+        return sum(
+            c.size - c.completed_tasks - c.failed_tasks
+            for c in self.active_chunks()
+        )
 
     def is_done(self) -> bool:
         """True if all chunks are completed or permanently failed.
 
         Cancelled chunks are NOT done — they need to be resumed.
         """
-        return all(
-            c.status in ("completed", "partial_failure")
+        no_pending_work = not any(
+            c.status in ("pending", "submitted", "running", "submit_failed",
+                         "cancelled")
             for c in self.chunks.values()
-        ) and all(
-            f.permanently_failed for f in self.failures.values()
-        ) if self.failures else all(
-            c.status == "completed" for c in self.chunks.values()
         )
+        no_retriable = all(f.permanently_failed for f in self.failures.values())
+        return no_pending_work and no_retriable
 
     def all_retries_resolved(self) -> bool:
         """True if no failures are pending retry."""
@@ -194,8 +199,10 @@ class State:
         # Per-task completion counts from all chunks (including active ones)
         completed_tasks = sum(c.completed_tasks for c in self.chunks.values())
         active = sum(
-            c.size - c.completed_tasks for c in self.active_chunks()
+            c.size - c.completed_tasks - c.failed_tasks
+            for c in self.active_chunks()
         )
+        failing_active = sum(c.failed_tasks for c in self.active_chunks())
         pending_chunks = len(self.pending_chunks())
         pending_tasks = sum(c.size for c in self.pending_chunks())
         failed_retry = sum(
@@ -208,6 +215,7 @@ class State:
             "total_jobs": self.total_jobs,
             "completed_tasks": completed_tasks,
             "active_tasks": active,
+            "failing_active": failing_active,
             "pending_tasks": pending_tasks,
             "completed_chunks": completed_chunks,
             "active_chunks": len(self.active_chunks()),
