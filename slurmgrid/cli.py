@@ -5,7 +5,9 @@ from __future__ import annotations
 import configargparse
 import logging
 import os
+import shutil
 import sys
+from datetime import datetime
 from typing import List, Optional
 
 from . import __version__
@@ -111,6 +113,15 @@ def main(argv: Optional[List[str]] = None) -> None:
              "submitting the next. Use when tasks compete for an external resource "
              "(e.g., API rate limits) beyond what Slurm's %%throttle controls",
     )
+    p_submit.add_argument(
+        "--restart", action="store_true",
+        help="If the state dir already exists, back it up and start fresh. "
+             "The old state dir is renamed to <state-dir>.bak.<YYYYMMDD_HHMMSS>.",
+    )
+    p_submit.add_argument(
+        "--no-backup", action="store_true",
+        help="With --restart, delete the old state dir instead of backing it up.",
+    )
     _add_slurm_args(p_submit)
 
     # --- resume ---
@@ -129,6 +140,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     p_resume.add_argument(
         "--reset-failures", action="store_true",
         help="Reset permanently failed tasks so they can be retried",
+    )
+    p_resume.add_argument(
+        "--after-run", default=None, metavar="STATE_DIR",
+        help="Wait for a previous run to finish before resuming "
+             "(path to its state directory)",
     )
     _add_slurm_args(p_resume)
 
@@ -244,9 +260,20 @@ def cmd_submit(args: argparse.Namespace) -> None:
     setup_logging(state_dir)
 
     if state_exists(state_dir):
-        log.error("State directory already contains a run: %s", state_dir)
-        log.error("Use 'resume' to continue, or choose a different --state-dir")
-        sys.exit(1)
+        if args.restart:
+            if args.no_backup:
+                shutil.rmtree(state_dir)
+                log.info("Deleted old state dir: %s", state_dir)
+            else:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_dir = f"{state_dir}.bak.{timestamp}"
+                os.rename(state_dir, backup_dir)
+                log.info("Backed up old state dir to: %s", backup_dir)
+        else:
+            log.error("State directory already contains a run: %s", state_dir)
+            log.error("Use 'resume' to continue, or choose a different --state-dir")
+            log.error("Use --restart to back up and start fresh.")
+            sys.exit(1)
 
     after_run = os.path.abspath(args.after_run) if args.after_run else None
     if after_run and not state_exists(after_run):
@@ -371,6 +398,12 @@ def cmd_resume(args: argparse.Namespace) -> None:
         config.max_runtime = args.max_runtime
     if args.self_resubmit:
         config.self_resubmit = True
+    if args.after_run is not None:
+        after_run = os.path.abspath(args.after_run)
+        if not state_exists(after_run):
+            log.error("--after-run state directory not found: %s", after_run)
+            sys.exit(1)
+        config.after_run = after_run
 
     state = load_state(state_dir)
 
