@@ -64,6 +64,10 @@ jobs:
             echo "No cache found, will build from scratch"
           fi
 
+      - name: Build Slurm Docker image
+        working-directory: /tmp/slurm-docker
+        run: docker compose build
+
       - name: Start Slurm cluster
         working-directory: /tmp/slurm-docker
         run: |
