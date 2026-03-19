@@ -43,7 +43,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Clone slurm-docker-cluster
-        run: git clone --depth 1 https://github.com/giovtorres/slurm-docker-cluster.git /tmp/slurm-docker
+        # Pinned to 2.1.0 (526c9847) — latest stable tag.
+        # To upgrade: check https://github.com/giovtorres/slurm-docker-cluster/releases
+        # and update the SHA below.
+        run: |
+          git clone https://github.com/giovtorres/slurm-docker-cluster.git /tmp/slurm-docker
+          git -C /tmp/slurm-docker checkout 526c9847c0b3d61c2ec966378a3a92feb25444c1
 
       - name: Get slurm-docker-cluster version
         id: slurm-version
