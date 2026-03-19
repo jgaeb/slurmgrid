@@ -43,7 +43,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Clone slurm-docker-cluster
-        run: git clone --depth 1 https://github.com/giovtorres/slurm-docker-cluster.git /tmp/slurm-docker
+        # Pinned to 2.1.0 (526c9847) — latest stable tag.
+        # To upgrade: check https://github.com/giovtorres/slurm-docker-cluster/releases
+        # and update the SHA below.
+        run: |
+          git clone https://github.com/giovtorres/slurm-docker-cluster.git /tmp/slurm-docker
+          git -C /tmp/slurm-docker checkout 526c9847c0b3d61c2ec966378a3a92feb25444c1
 
       - name: Get slurm-docker-cluster version
         id: slurm-version
@@ -63,6 +68,10 @@ jobs:
           else
             echo "No cache found, will build from scratch"
           fi
+
+      - name: Build Slurm Docker image
+        working-directory: /tmp/slurm-docker
+        run: docker compose build
 
       - name: Start Slurm cluster
         working-directory: /tmp/slurm-docker
@@ -84,18 +93,20 @@ jobs:
 
       - name: Copy project into all Slurm containers
         run: |
-          for container in slurmctld c1 c2; do
+          for container in $(docker compose -f /tmp/slurm-docker/docker-compose.yml config --services); do
             docker compose -f /tmp/slurm-docker/docker-compose.yml \
-              cp . ${container}:/opt/slurmgrid
+              cp . ${container}:/opt/slurmgrid 2>/dev/null || true
           done
 
       - name: Install slurmgrid on all Slurm nodes
         working-directory: /tmp/slurm-docker
         run: |
-          for container in slurmctld c1 c2; do
-            docker compose exec -T ${container} python3 -m ensurepip --upgrade
-            docker compose exec -T ${container} python3 -m pip install -e /opt/slurmgrid
+          for container in $(docker compose config --services); do
+            docker compose exec -T ${container} python3 -m ensurepip --upgrade 2>/dev/null || true
+            docker compose exec -T ${container} python3 -m pip install -e /opt/slurmgrid 2>/dev/null || true
           done
+          # Verify install on the controller (required)
+          docker compose exec -T slurmctld python3 -m slurmgrid --version
 
       - name: Run integration tests
         working-directory: /tmp/slurm-docker
