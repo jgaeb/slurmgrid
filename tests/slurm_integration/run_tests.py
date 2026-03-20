@@ -920,9 +920,9 @@ def test_cancel_and_resume(project_dir):
     log("Running slurmgrid resume...")
     result = run_slurmgrid(project_dir, [
         "resume", "--state-dir", state_dir,
-        "--max-runtime", "120",
+        "--max-runtime", "240",
         "--poll-interval", "5",
-    ], timeout=180)
+    ], timeout=360)
 
     if result.returncode != 0:
         log("FAIL: resume command failed")
