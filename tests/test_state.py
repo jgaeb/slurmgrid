@@ -139,6 +139,49 @@ class TestState(unittest.TestCase):
         s.record_failure(0, "chunk_000", 0, 1)  # not yet permanent
         self.assertFalse(s.is_done())
 
+    def test_is_done_all_retries_succeeded_partial_failure_chunks_remain(self):
+        """Regression: is_done() must not loop forever when all retried tasks
+        succeed, failures dict is cleared, but original chunks stay in
+        partial_failure status.
+        """
+        s = new_state(total_jobs=5, chunk_size=5, max_concurrent=5,
+                      max_retries=2)
+        s.add_chunk("chunk_000", 5, {"0": 0, "1": 1, "2": 2, "3": 3, "4": 4})
+        s.mark_submitted("chunk_000", "1")
+        s.mark_partial_failure("chunk_000")
+        # Record a failure then simulate successful retry by removing it
+        s.record_failure(0, "chunk_000", 0, 1)
+        del s.failures["0"]  # retry chunk succeeded — record cleared
+        # chunk_000 is still in partial_failure, failures dict is now empty
+        self.assertTrue(s.is_done())
+
+    def test_is_done_cancelled_not_done(self):
+        """Cancelled chunks are not done — they need to be resumed."""
+        s = new_state(total_jobs=5, chunk_size=5, max_concurrent=5,
+                      max_retries=0)
+        s.add_chunk("chunk_000", 5, {"0": 0, "1": 1, "2": 2, "3": 3, "4": 4})
+        s.mark_submitted("chunk_000", "1")
+        s.mark_cancelled("chunk_000")
+        self.assertFalse(s.is_done())
+
+    def test_active_job_count_excludes_failed_tasks(self):
+        s = self._make_state()
+        s.mark_submitted("chunk_000", "123")
+        # 2 tasks succeeded, 3 failed (in-flight display only)
+        s.chunks["chunk_000"].completed_tasks = 2
+        s.chunks["chunk_000"].failed_tasks = 3
+        # active = size - completed - failed = 7 - 2 - 3 = 2
+        self.assertEqual(s.active_job_count(), 2)
+
+    def test_summary_failing_active(self):
+        s = self._make_state()
+        s.mark_submitted("chunk_000", "123")
+        s.chunks["chunk_000"].completed_tasks = 2
+        s.chunks["chunk_000"].failed_tasks = 3
+        summary = s.summary()
+        self.assertEqual(summary["failing_active"], 3)
+        self.assertEqual(summary["active_tasks"], 2)  # 7 - 2 - 3
+
 
 class TestResetFailures(unittest.TestCase):
     def test_reset_clears_permanently_failed(self):
