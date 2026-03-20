@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import configargparse
+import csv
 import logging
 import os
 import sys
@@ -150,6 +151,24 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     p_cancel.add_argument("--state-dir", required=True)
 
+    # --- failures ---
+    p_failures = subparsers.add_parser(
+        "failures", help="Show currently-failing jobs with log tails",
+    )
+    p_failures.add_argument("--state-dir", required=True)
+    p_failures.add_argument(
+        "--tail", type=int, default=20, metavar="N",
+        help="Lines of .err to show inline (default: 20, 0 to suppress)",
+    )
+    p_failures.add_argument(
+        "--paths-only", action="store_true",
+        help="Show only log file paths, no inline content",
+    )
+    p_failures.add_argument(
+        "--permanently-failed-only", action="store_true",
+        help="Only show permanently failed tasks (not retriable ones)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.subcommand == "submit":
@@ -160,6 +179,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         cmd_status(args)
     elif args.subcommand == "cancel":
         cmd_cancel(args)
+    elif args.subcommand == "failures":
+        cmd_failures(args)
 
 
 def _add_slurm_args(parser: argparse.ArgumentParser) -> None:
@@ -450,6 +471,88 @@ def cmd_cancel(args: argparse.Namespace) -> None:
     save_state(state, state_dir)
     print("Done. Jobs cancelled and state updated.")
     print("Use 'slurmgrid resume' to resubmit cancelled chunks.")
+
+
+def cmd_failures(args) -> None:
+    """Handle the 'failures' subcommand."""
+    state_dir = os.path.abspath(args.state_dir)
+
+    if not state_exists(state_dir):
+        print(f"No state found at {state_dir}")
+        sys.exit(1)
+
+    state = load_state(state_dir)
+    config = None
+    try:
+        from .config import load_config
+        config = load_config(state_dir)
+    except Exception:
+        pass
+
+    failures = state.failures
+    if args.permanently_failed_only:
+        failures = {k: f for k, f in failures.items() if f.permanently_failed}
+
+    if not failures:
+        print("No failures.")
+        return
+
+    # Load manifest rows indexed by global_index for parameter display
+    manifest_rows: dict = {}
+    manifest_headers: List[str] = []
+    if config is not None:
+        delimiter = config.resolved_delimiter
+        try:
+            with open(config.manifest, newline="") as mf:
+                reader = csv.reader(mf, delimiter=delimiter)
+                manifest_headers = next(reader)
+                for row_idx, row in enumerate(reader):
+                    if str(row_idx) in failures:
+                        manifest_rows[row_idx] = row
+        except OSError:
+            pass
+
+    for key in sorted(failures, key=lambda k: int(k)):
+        f = failures[key]
+        print(f"\n{'=' * 60}")
+        print(f"Row {f.global_index}  exit={f.exit_code}  retries={f.retries}  "
+              f"permanent={f.permanently_failed}")
+
+        # Parameter values from manifest
+        if manifest_headers and f.global_index in manifest_rows:
+            row = manifest_rows[f.global_index]
+            params = "  ".join(
+                f"{h}={v}" for h, v in zip(manifest_headers, row)
+            )
+            print(f"  {params}")
+
+        # Log file paths
+        chunk = state.chunks.get(f.chunk_id)
+        job_id = chunk.slurm_job_id if chunk else None
+        if job_id:
+            log_dir = os.path.join(state_dir, "logs", f.chunk_id)
+            out_path = os.path.join(
+                log_dir, f"slurm-{job_id}_{f.array_index}.out",
+            )
+            err_path = os.path.join(
+                log_dir, f"slurm-{job_id}_{f.array_index}.err",
+            )
+            print(f"  OUT: {out_path}")
+            print(f"  ERR: {err_path}")
+
+            if not args.paths_only and args.tail > 0:
+                try:
+                    with open(err_path) as ef:
+                        lines = ef.readlines()
+                    tail_lines = lines[-args.tail:]
+                    if tail_lines:
+                        print(f"  --- last {len(tail_lines)} lines of .err ---")
+                        for line in tail_lines:
+                            print("  " + line, end="")
+                except OSError:
+                    print("  (err log not found)")
+        else:
+            print(f"  chunk={f.chunk_id}  array_index={f.array_index}")
 
 
 def _print_summary(state: State) -> None:

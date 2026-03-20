@@ -12,6 +12,7 @@ from slurmgrid.cli import (
     _print_final_report,
     _print_summary,
     cmd_cancel,
+    cmd_failures,
     cmd_resume,
     cmd_status,
     cmd_submit,
@@ -544,6 +545,137 @@ class TestPrintFinalReport(unittest.TestCase):
         for i in range(25):
             state.record_failure(i, "chunk_000", i, 1)
         _print_final_report(state)
+
+
+class TestCmdFailures(unittest.TestCase):
+    def setUp(self):
+        logging.getLogger("slurmgrid").handlers = []
+
+    def _make_args(self, state_dir, tail=20, paths_only=False,
+                   permanently_failed_only=False):
+        import argparse
+        return argparse.Namespace(
+            state_dir=state_dir,
+            tail=tail,
+            paths_only=paths_only,
+            permanently_failed_only=permanently_failed_only,
+        )
+
+    def test_no_state_exits(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = self._make_args(tmpdir)
+            with self.assertRaises(SystemExit):
+                cmd_failures(args)
+
+    def test_no_failures_prints_message(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = new_state(5, 5, 10, 0)
+            state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+            state.mark_submitted("chunk_000", "123")
+            state.mark_completed("chunk_000")
+            save_state(state, tmpdir)
+
+            args = self._make_args(tmpdir)
+            from io import StringIO
+            with patch("sys.stdout", new_callable=StringIO) as mock_out:
+                cmd_failures(args)
+            self.assertIn("No failures", mock_out.getvalue())
+
+    def test_shows_failures_with_manifest(self):
+        manifest = os.path.join(FIXTURES, "sample_manifest.csv")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from slurmgrid.config import RunConfig, SlurmConfig, freeze_config
+            config = RunConfig(
+                manifest=manifest, command="echo {alpha}",
+                state_dir=tmpdir, max_retries=0, slurm=SlurmConfig(),
+            )
+            freeze_config(config, tmpdir)
+
+            state = new_state(5, 5, 10, 0)
+            state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+            state.mark_submitted("chunk_000", "456")
+            state.mark_partial_failure("chunk_000")
+            state.record_failure(0, "chunk_000", 0, 1)
+            save_state(state, tmpdir)
+
+            args = self._make_args(tmpdir, tail=0)
+            from io import StringIO
+            with patch("sys.stdout", new_callable=StringIO) as mock_out:
+                cmd_failures(args)
+            output = mock_out.getvalue()
+            self.assertIn("Row 0", output)
+            self.assertIn("exit=1", output)
+
+    def test_permanently_failed_only_filter(self):
+        manifest = os.path.join(FIXTURES, "sample_manifest.csv")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from slurmgrid.config import RunConfig, SlurmConfig, freeze_config
+            config = RunConfig(
+                manifest=manifest, command="echo {alpha}",
+                state_dir=tmpdir, max_retries=2, slurm=SlurmConfig(),
+            )
+            freeze_config(config, tmpdir)
+
+            state = new_state(5, 5, 10, 2)
+            state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+            state.mark_submitted("chunk_000", "789")
+            state.mark_partial_failure("chunk_000")
+            state.record_failure(0, "chunk_000", 0, 1)  # not permanent
+            state.record_failure(1, "chunk_000", 1, 1)  # not permanent
+            # Make row 1 permanently failed
+            state.failures["1"].permanently_failed = True
+            save_state(state, tmpdir)
+
+            args = self._make_args(tmpdir, tail=0, permanently_failed_only=True)
+            from io import StringIO
+            with patch("sys.stdout", new_callable=StringIO) as mock_out:
+                cmd_failures(args)
+            output = mock_out.getvalue()
+            self.assertIn("Row 1", output)
+            self.assertNotIn("Row 0", output)
+
+    def test_paths_only_skips_log_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = new_state(5, 5, 10, 0)
+            state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+            state.mark_submitted("chunk_000", "999")
+            state.mark_partial_failure("chunk_000")
+            state.record_failure(0, "chunk_000", 0, 2)
+            save_state(state, tmpdir)
+
+            args = self._make_args(tmpdir, paths_only=True)
+            from io import StringIO
+            with patch("sys.stdout", new_callable=StringIO) as mock_out:
+                cmd_failures(args)
+            output = mock_out.getvalue()
+            self.assertIn("OUT:", output)
+            self.assertIn("ERR:", output)
+            self.assertNotIn("last", output)
+
+    def test_tail_shows_err_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = new_state(5, 5, 10, 0)
+            state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+            state.mark_submitted("chunk_000", "111")
+            state.mark_partial_failure("chunk_000")
+            state.record_failure(0, "chunk_000", 0, 1)
+            save_state(state, tmpdir)
+
+            # Write a fake .err file
+            log_dir = os.path.join(tmpdir, "logs", "chunk_000")
+            os.makedirs(log_dir, exist_ok=True)
+            err_path = os.path.join(log_dir, "slurm-111_0.err")
+            with open(err_path, "w") as f:
+                f.write("line1\nline2\nline3\n")
+
+            args = self._make_args(tmpdir, tail=2)
+            from io import StringIO
+            with patch("sys.stdout", new_callable=StringIO) as mock_out:
+                cmd_failures(args)
+            output = mock_out.getvalue()
+            self.assertIn("line2", output)
+            self.assertIn("line3", output)
+            self.assertNotIn("line1", output)
 
 
 if __name__ == "__main__":
