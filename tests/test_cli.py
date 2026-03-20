@@ -717,6 +717,7 @@ class TestCmdSubmitRestart(unittest.TestCase):
             after_run=None,
             self_resubmit=False,
             serial_chunks=False,
+            headroom=None,
             restart=restart,
             no_backup=no_backup,
             config=None,
