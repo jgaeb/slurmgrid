@@ -58,6 +58,7 @@ def run(state: State, config: RunConfig) -> State:
                 chunk.status = "pending"
                 chunk.slurm_job_id = None
                 chunk.completed_tasks = 0
+                chunk.failed_tasks = 0
                 if config.slurm_overrides:
                     chunk.slurm_overrides = dict(config.slurm_overrides)
                 log.info("Re-queued cancelled chunk %s for resubmission",
@@ -297,9 +298,13 @@ def _update_single_chunk(
             if array_idx not in chunk_tasks:
                 chunk_tasks[array_idx] = cancelled
 
-    # Update per-task completion count (for progress reporting)
+    # Update per-task completion and failure counts (for progress reporting)
     succeeded = sum(1 for ts in chunk_tasks.values() if ts.state.is_success)
+    failed = sum(
+        1 for ts in chunk_tasks.values() if ts.state.is_retriable_failure
+    )
     state.chunks[chunk.chunk_id].completed_tasks = succeeded
+    state.chunks[chunk.chunk_id].failed_tasks = failed
 
     # Check if all tasks have reached a terminal state
     all_terminal = (
@@ -500,10 +505,11 @@ def _log_progress(state: State) -> None:
     """Log a one-line progress summary."""
     s = state.summary()
     log.info(
-        "Progress: %d/%d completed, %d active, %d pending, "
+        "Progress: %d/%d completed, %d active (%d failing), %d pending, "
         "%d failed (retrying), %d failed (final)",
         s["completed_tasks"], s["total_jobs"], s["active_tasks"],
-        s["pending_tasks"], s["failed_retry"], s["failed_final"],
+        s.get("failing_active", 0), s["pending_tasks"],
+        s["failed_retry"], s["failed_final"],
     )
 
 
