@@ -972,6 +972,105 @@ def test_restart_submit(project_dir):
     return True
 
 
+def test_failures_subcommand(project_dir):
+    """Test: 'failures' subcommand lists permanently-failed jobs with details."""
+    log("=" * 60)
+    log("TEST: failures_subcommand")
+    log("=" * 60)
+
+    tmpdir = make_shared_dir("test_failures_cmd")
+    manifest = os.path.join(tmpdir, "manifest.csv")
+    state_dir = os.path.join(tmpdir, "state")
+    # 6 jobs; indices 1 and 4 always fail (max_retries=0 → permanently failed)
+    create_failing_manifest(manifest, 6, fail_indices={1, 4})
+
+    result = run_slurmgrid(project_dir, [
+        "submit",
+        "--manifest", manifest,
+        "--command", "exit {should_fail}",
+        "--state-dir", state_dir,
+        "--chunk-size", "6",
+        "--max-concurrent", "10",
+        "--max-retries", "0",
+        "--max-runtime", "120",
+        "--poll-interval", "5",
+        "--time", "00:05:00",
+    ])
+
+    if result.returncode != 0:
+        log("FAIL: initial submit exited with non-zero")
+        _dump_debug_info(state_dir)
+        return False
+
+    state = load_state(state_dir)
+    perm_failed = sum(
+        1 for f in state.get("failures", {}).values() if f["permanently_failed"]
+    )
+    if perm_failed != 2:
+        log(f"FAIL: expected 2 permanently failed before testing, got {perm_failed}")
+        _dump_debug_info(state_dir)
+        return False
+
+    # Run the failures subcommand
+    result = run_slurmgrid(project_dir, [
+        "failures", "--state-dir", state_dir, "--paths-only",
+    ])
+
+    if result.returncode != 0:
+        log("FAIL: failures subcommand exited with non-zero")
+        return False
+
+    output = result.stdout
+    log(f"failures output:\n{output}")
+
+    # Should show 2 failure entries
+    separator_count = output.count("=" * 60)
+    if separator_count < 2:
+        log(f"FAIL: expected at least 2 failure entries, got {separator_count} separators")
+        return False
+
+    # Should display row indices 1 and 4 (our failing rows)
+    if "Row 1" not in output:
+        log("FAIL: Row 1 not found in failures output")
+        return False
+    if "Row 4" not in output:
+        log("FAIL: Row 4 not found in failures output")
+        return False
+
+    # Should show exit code and permanent=True
+    if "exit=1" not in output:
+        log("FAIL: exit=1 not found in failures output")
+        return False
+    if "permanent=True" not in output:
+        log("FAIL: permanent=True not found in failures output")
+        return False
+
+    # Should show log file paths
+    if "OUT:" not in output or "ERR:" not in output:
+        log("FAIL: log file paths (OUT:/ERR:) not found in failures output")
+        return False
+
+    # With --paths-only, should NOT show the "--- last N lines ---" section
+    if "--- last" in output:
+        log("FAIL: --paths-only should suppress err log content but found '--- last'")
+        return False
+
+    # Test --permanently-failed-only filter (should show same 2 failures)
+    result2 = run_slurmgrid(project_dir, [
+        "failures", "--state-dir", state_dir, "--paths-only",
+        "--permanently-failed-only",
+    ])
+    if result2.returncode != 0:
+        log("FAIL: failures --permanently-failed-only exited with non-zero")
+        return False
+    if result2.stdout.count("=" * 60) != separator_count:
+        log("FAIL: --permanently-failed-only showed different count than expected")
+        return False
+
+    log("PASS")
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -995,6 +1094,7 @@ def main():
         test_status_command,
         test_basic_submit_and_complete,
         test_failure_and_retry,
+        test_failures_subcommand,
         test_cancel_and_resume,
         test_reset_failures_with_overrides,
         test_restart_submit,
