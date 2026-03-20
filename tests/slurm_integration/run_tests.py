@@ -784,8 +784,10 @@ def test_retry_succeeded_then_done(project_dir):
     # Command: fail on first run (no marker), succeed on retry (marker present).
     # The marker is keyed on SLURM_ARRAY_TASK_ID, which is identical on both
     # original run and retry chunk (both use array indices 0..N-1).
+    # Use $SLURM_ARRAY_TASK_ID without braces — braces would match the
+    # {placeholder} validator and be rejected as a missing manifest column.
     command = (
-        f"marker={marker_dir}/task_${{SLURM_ARRAY_TASK_ID}}; "
+        f"marker={marker_dir}/task_$SLURM_ARRAY_TASK_ID; "
         f"if [ ! -f \"$marker\" ]; then touch \"$marker\"; exit 1; fi; exit 0"
     )
 
