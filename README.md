@@ -161,6 +161,37 @@ Slurm flags passed to `resume` override the frozen config for this session
 only — the original `config.json` is not modified. Overrides are recorded
 per-chunk in `state.json` for provenance.
 
+### Chain runs with --after-run
+
+If stage 2 depends on stage 1, pass stage 1's state directory to stage 2's
+`submit` (or `resume`) with `--after-run`. Stage 2's monitor will block until
+stage 1 is done before submitting any jobs:
+
+```bash
+# Stage 1 runs in background (or as a Slurm job with --self-resubmit)
+python -m slurmgrid submit --config stage1.yaml --state-dir ./stage1 &
+
+# Stage 2 waits for stage 1 to finish before submitting
+python -m slurmgrid submit --config stage2.yaml --state-dir ./stage2 \
+  --after-run ./stage1
+```
+
+### Restart a run from scratch
+
+To re-run from scratch with the same state directory, pass `--restart`. The
+old state is backed up automatically before the new run begins:
+
+```bash
+python -m slurmgrid submit --config run.yaml --restart
+```
+
+The old directory is renamed to `<state-dir>.bak.<YYYYMMDD_HHMMSS>`. To
+delete it instead of backing it up:
+
+```bash
+python -m slurmgrid submit --config run.yaml --restart --no-backup
+```
+
 ### Check status
 
 ```bash
@@ -171,13 +202,38 @@ python -m slurmgrid status --state-dir ./my_run
 ==================================================
   Total jobs:            50000
   Completed:             35420  (70.8%)
-  Active:                 4580
+  Active:                 4580  (12 failing)
   Pending:               10000
   Failed (retrying):         0
   Failed (final):            0
   Chunks: 35/50 completed, 5 active, 10 pending
 ==================================================
 ```
+
+### Inspect failing jobs
+
+While a run is in progress (or after it finishes), list all currently-failing
+tasks with their manifest parameters and log file paths:
+
+```bash
+python -m slurmgrid failures --state-dir ./my_run
+```
+
+```
+============================================================
+Row 42  exit=1  retries=1  permanent=False
+  alpha=0.5  beta=2  seed=42
+  OUT: ./my_run/logs/chunk_003/slurm-98765_8.out
+  ERR: ./my_run/logs/chunk_003/slurm-98765_8.err
+  --- last 5 lines of .err ---
+  Traceback (most recent call last):
+  ...
+```
+
+Useful flags:
+- `--permanently-failed-only`: show only tasks that have exhausted all retries
+- `--tail N`: show last N lines of each task's `.err` log (default: 5)
+- `--paths-only`: show log paths but suppress log content
 
 ### Cancel all jobs
 
@@ -274,6 +330,9 @@ sc_state/
 | `--preamble-file` | | File containing preamble commands |
 | `--extra-sbatch` | | Extra `#SBATCH` flags (repeatable) |
 | `--after-run` | | Wait for a previous run to finish before submitting (path to its state directory) |
+| `--restart` | false | Back up the existing state dir and start fresh |
+| `--no-backup` | false | With `--restart`, delete the old state dir instead of backing it up |
+| `--headroom` | auto | Reserve this many task slots for your other Slurm jobs; don't submit a new chunk if it would push your total active tasks above `max-concurrent - headroom` |
 | `--self-resubmit` | false | On `--max-runtime` exit, automatically sbatch a new resume job |
 | `--serial-chunks` | false | Submit one chunk at a time (wait for full completion before submitting the next) |
 | `--config` | | YAML config file; any option above can be set as a key |
