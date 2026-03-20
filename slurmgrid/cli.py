@@ -115,6 +115,12 @@ def main(argv: Optional[List[str]] = None) -> None:
              "(e.g., API rate limits) beyond what Slurm's %%throttle controls",
     )
     p_submit.add_argument(
+        "--headroom", type=int, default=None, metavar="N",
+        help="Reserved task slots: don't submit if total user Slurm tasks "
+             "would exceed max-concurrent minus headroom "
+             "(default: min(100, max-concurrent // 10))",
+    )
+    p_submit.add_argument(
         "--restart", action="store_true",
         help="If the state dir already exists, back it up and start fresh. "
              "The old state dir is renamed to <state-dir>.bak.<YYYYMMDD_HHMMSS>.",
@@ -320,6 +326,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         after_run=after_run,
         self_resubmit=args.self_resubmit,
         serial_chunks=args.serial_chunks,
+        headroom=args.headroom,
         slurm=slurm_config,
     )
 

@@ -685,6 +685,135 @@ class TestSlurmOverridesStamped(unittest.TestCase):
         )
 
 
+class TestHeadroomCheck(unittest.TestCase):
+    """Tests for the user-task headroom check in _submit_to_fill()."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.config = RunConfig(
+            manifest=os.path.join(FIXTURES, "sample_manifest.csv"),
+            command="echo {alpha}",
+            state_dir=self.tmpdir,
+            max_concurrent=100,
+            max_retries=0,
+            poll_interval=1,
+            headroom=10,
+            slurm=SlurmConfig(),
+        )
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("slurmgrid.monitor.get_user_job_count", return_value=95)
+    @patch("slurmgrid.monitor.slurm")
+    def test_headroom_blocks_submission_when_near_limit(self, mock_slurm, mock_count):
+        """If user tasks + chunk size > max_concurrent - headroom, don't submit."""
+        state = new_state(10, 5, 100, 0)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        state.add_chunk("chunk_001", 5, {str(i+5): i for i in range(5)})
+
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        for cid in ("chunk_000", "chunk_001"):
+            with open(os.path.join(scripts_dir, f"{cid}.sh"), "w") as f:
+                f.write("#!/bin/bash\necho hi\n")
+
+        mock_slurm.sbatch.return_value = "111"
+
+        # active_tasks=0, so first chunk always submits regardless of headroom
+        # but second chunk: user_task_count(95) + 5 = 100 > 100-10=90 → blocked
+        _submit_to_fill(state, self.config)
+        self.assertEqual(mock_slurm.sbatch.call_count, 1)
+
+    @patch("slurmgrid.monitor.get_user_job_count", return_value=None)
+    @patch("slurmgrid.monitor.slurm")
+    def test_headroom_skipped_when_user_count_unknown(self, mock_slurm, mock_count):
+        """If user job count is unavailable, submit anyway."""
+        state = new_state(10, 5, 100, 0)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+        state.add_chunk("chunk_001", 5, {str(i+5): i for i in range(5)})
+
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        for cid in ("chunk_000", "chunk_001"):
+            with open(os.path.join(scripts_dir, f"{cid}.sh"), "w") as f:
+                f.write("#!/bin/bash\necho hi\n")
+
+        mock_slurm.sbatch.return_value = "111"
+
+        _submit_to_fill(state, self.config)
+        self.assertEqual(mock_slurm.sbatch.call_count, 2)
+
+
+class TestSubmitChunkErrorClassification(unittest.TestCase):
+    """Tests for queue-limit error logging in _submit_chunk()."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.config = RunConfig(
+            manifest="/dev/null",
+            command="echo hi",
+            state_dir=self.tmpdir,
+            max_concurrent=10,
+            max_retries=0,
+            poll_interval=1,
+            slurm=SlurmConfig(),
+        )
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("slurmgrid.monitor.slurm")
+    def test_queue_limit_error_logged_at_info(self, mock_slurm):
+        mock_slurm.sbatch.side_effect = SlurmError(
+            "sbatch failed: QOSMaxJobsPerUser limit reached"
+        )
+        mock_slurm.SlurmError = SlurmError
+
+        state = new_state(5, 5, 10, 0)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        with open(os.path.join(scripts_dir, "chunk_000.sh"), "w") as f:
+            f.write("#!/bin/bash\necho hi\n")
+
+        chunk = state.chunks["chunk_000"]
+        import logging
+        with self.assertLogs("slurmgrid.monitor", level="INFO") as cm:
+            _submit_chunk(chunk, state, self.config)
+
+        self.assertEqual(state.chunks["chunk_000"].status, "submit_failed")
+        # Should log at INFO, not ERROR
+        self.assertTrue(any("deferred" in msg for msg in cm.output))
+        self.assertFalse(any("ERROR" in msg and "Failed to submit" in msg
+                             for msg in cm.output))
+
+    @patch("slurmgrid.monitor.slurm")
+    def test_unexpected_error_logged_at_error(self, mock_slurm):
+        mock_slurm.sbatch.side_effect = SlurmError("connection refused")
+        mock_slurm.SlurmError = SlurmError
+
+        state = new_state(5, 5, 10, 0)
+        state.add_chunk("chunk_000", 5, {str(i): i for i in range(5)})
+
+        scripts_dir = os.path.join(self.tmpdir, "scripts")
+        os.makedirs(scripts_dir)
+        with open(os.path.join(scripts_dir, "chunk_000.sh"), "w") as f:
+            f.write("#!/bin/bash\necho hi\n")
+
+        chunk = state.chunks["chunk_000"]
+        import logging
+        with self.assertLogs("slurmgrid.monitor", level="INFO") as cm:
+            _submit_chunk(chunk, state, self.config)
+
+        self.assertEqual(state.chunks["chunk_000"].status, "submit_failed")
+        self.assertTrue(any("ERROR" in msg and "Failed to submit" in msg
+                            for msg in cm.output))
+
+
 class TestInstallSignalHandlers(unittest.TestCase):
     def test_handlers_installed(self):
         _install_signal_handlers()

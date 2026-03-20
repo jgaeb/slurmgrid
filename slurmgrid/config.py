@@ -83,6 +83,7 @@ class RunConfig:
     after_run: Optional[str] = None  # State dir of a run to wait for
     self_resubmit: bool = False  # Resubmit as a new Slurm job on max_runtime exit
     serial_chunks: bool = False  # Submit one chunk at a time (for rate-limited workloads)
+    headroom: Optional[int] = None  # Reserved task slots; None = auto (min(100, max_concurrent//10))
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
     slurm_overrides: Dict[str, str] = field(default_factory=dict)  # Transient; not frozen
 

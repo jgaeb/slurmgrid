@@ -10,6 +10,7 @@ from slurmgrid.slurm import (
     TaskStatus,
     _run_command,
     get_max_array_size,
+    get_user_job_count,
     sacct_query,
     sbatch,
     scancel,
@@ -270,6 +271,40 @@ class TestGetMaxArraySize(unittest.TestCase):
             stderr="",
         )
         self.assertEqual(get_max_array_size(), 1001)
+
+
+class TestGetUserJobCount(unittest.TestCase):
+    @patch("slurmgrid.slurm._run_command")
+    def test_counts_lines(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="12345_0 RUNNING\n12345_1 RUNNING\n12346 PENDING\n",
+            stderr="",
+        )
+        with patch.dict("os.environ", {"USER": "testuser"}):
+            count = get_user_job_count()
+        self.assertEqual(count, 3)
+
+    @patch("slurmgrid.slurm._run_command")
+    def test_returns_none_on_slurm_error(self, mock_run):
+        mock_run.side_effect = SlurmError("squeue failed")
+        with patch.dict("os.environ", {"USER": "testuser"}):
+            count = get_user_job_count()
+        self.assertIsNone(count)
+
+    @patch("slurmgrid.slurm._run_command")
+    def test_returns_none_on_os_error(self, mock_run):
+        mock_run.side_effect = FileNotFoundError("squeue not found")
+        with patch.dict("os.environ", {"USER": "testuser"}):
+            count = get_user_job_count()
+        self.assertIsNone(count)
+
+    def test_returns_none_when_no_user_env(self):
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k not in ("USER", "LOGNAME")}
+        with patch.dict("os.environ", env, clear=True):
+            count = get_user_job_count()
+        self.assertIsNone(count)
 
 
 if __name__ == "__main__":
