@@ -958,6 +958,104 @@ def test_cancel_and_resume(project_dir):
     return True
 
 
+def test_restart_submit(project_dir):
+    """Test: --restart on submit backs up the old state dir and starts fresh."""
+    log("=" * 60)
+    log("TEST: restart_submit")
+    log("=" * 60)
+
+    tmpdir = make_shared_dir("test_restart")
+    manifest = os.path.join(tmpdir, "manifest.csv")
+    state_dir = os.path.join(tmpdir, "state")
+    create_manifest(manifest, 4)
+
+    # First submit: run 4 jobs to completion
+    result = run_slurmgrid(project_dir, [
+        "submit",
+        "--manifest", manifest,
+        "--command", "echo first idx={idx}",
+        "--state-dir", state_dir,
+        "--chunk-size", "4",
+        "--max-concurrent", "10",
+        "--max-retries", "0",
+        "--max-runtime", "120",
+        "--poll-interval", "5",
+        "--time", "00:05:00",
+    ])
+
+    if result.returncode != 0:
+        log("FAIL: first submit exited with non-zero")
+        _dump_debug_info(state_dir)
+        return False
+
+    # Confirm state dir exists and is complete
+    state = load_state(state_dir)
+    completed = sum(1 for c in state["chunks"].values() if c["status"] == "completed")
+    if completed != len(state["chunks"]):
+        log("FAIL: first run did not fully complete")
+        return False
+
+    # Note the job IDs from the first run to distinguish from the second run
+    first_run_job_ids = {
+        c["slurm_job_id"] for c in state["chunks"].values() if c.get("slurm_job_id")
+    }
+    log(f"First run job IDs: {first_run_job_ids}")
+
+    # Second submit with --restart: should back up old state and start fresh
+    result = run_slurmgrid(project_dir, [
+        "submit",
+        "--manifest", manifest,
+        "--command", "echo second idx={idx}",
+        "--state-dir", state_dir,
+        "--chunk-size", "4",
+        "--max-concurrent", "10",
+        "--max-retries", "0",
+        "--max-runtime", "120",
+        "--poll-interval", "5",
+        "--time", "00:05:00",
+        "--restart",
+    ])
+
+    if result.returncode != 0:
+        log("FAIL: restart submit exited with non-zero")
+        _dump_debug_info(state_dir)
+        return False
+
+    # A backup directory should have been created next to state_dir
+    parent = os.path.dirname(state_dir)
+    backups = [
+        d for d in os.listdir(parent)
+        if d.startswith("state.bak.")
+    ]
+    if not backups:
+        log("FAIL: no backup directory (state.bak.*) found after --restart")
+        return False
+    log(f"Backup directory created: {backups[0]}")
+
+    # New state should be a fresh run (different job IDs)
+    new_state = load_state(state_dir)
+    new_job_ids = {
+        c["slurm_job_id"] for c in new_state["chunks"].values()
+        if c.get("slurm_job_id")
+    }
+    log(f"Second run job IDs: {new_job_ids}")
+    if new_job_ids & first_run_job_ids:
+        log("FAIL: second run reused job IDs from first run (state was not reset)")
+        return False
+
+    # Second run should have completed successfully
+    completed2 = sum(
+        1 for c in new_state["chunks"].values() if c["status"] == "completed"
+    )
+    if completed2 != len(new_state["chunks"]):
+        log(f"FAIL: second run did not fully complete ({completed2}/{len(new_state['chunks'])})")
+        _dump_debug_info(state_dir)
+        return False
+
+    log("PASS")
+    return True
+
+
 def test_failures_subcommand(project_dir):
     """Test: 'failures' subcommand lists permanently-failed jobs with details."""
     log("=" * 60)
@@ -1084,6 +1182,7 @@ def main():
         test_failures_subcommand,
         test_cancel_and_resume,
         test_reset_failures_with_overrides,
+        test_restart_submit,
         test_after_run,
         test_self_resubmit,
     ]

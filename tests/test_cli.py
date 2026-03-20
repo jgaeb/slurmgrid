@@ -171,6 +171,8 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 self_resubmit=False,
                 serial_chunks=False,
                 headroom=None,
+                restart=False,
+                no_backup=False,
                 config=None,
             )
             cmd_submit(args)
@@ -217,6 +219,8 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 self_resubmit=False,
                 serial_chunks=False,
                 headroom=None,
+                restart=False,
+                no_backup=False,
                 config=None,
             )
             with self.assertRaises(SystemExit):
@@ -250,6 +254,8 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 self_resubmit=False,
                 serial_chunks=False,
                 headroom=None,
+                restart=False,
+                no_backup=False,
                 config=None,
             )
             with self.assertRaises(SystemExit):
@@ -286,6 +292,8 @@ class TestCmdSubmitDryRun(unittest.TestCase):
                 self_resubmit=False,
                 serial_chunks=False,
                 headroom=None,
+                restart=False,
+                no_backup=False,
                 config=None,
             )
             cmd_submit(args)
@@ -389,7 +397,7 @@ class TestCmdResume(unittest.TestCase):
 
             args = argparse.Namespace(
                 state_dir=tmpdir, poll_interval=5, max_runtime=60,
-                self_resubmit=False, reset_failures=False,
+                self_resubmit=False, reset_failures=False, after_run=None,
                 partition=None, time=None, mem=None, mem_per_cpu=None,
                 cpus_per_task=None, gpus=None, gres=None, account=None,
                 qos=None, constraint=None, exclude=None,
@@ -409,7 +417,7 @@ class TestCmdResume(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             args = argparse.Namespace(
                 state_dir=tmpdir, poll_interval=None, max_runtime=None,
-                self_resubmit=False, reset_failures=False,
+                self_resubmit=False, reset_failures=False, after_run=None,
                 partition=None, time=None, mem=None, mem_per_cpu=None,
                 cpus_per_task=None, gpus=None, gres=None, account=None,
                 qos=None, constraint=None, exclude=None,
@@ -448,7 +456,7 @@ class TestCmdResumeResetFailures(unittest.TestCase):
 
             args = argparse.Namespace(
                 state_dir=tmpdir, poll_interval=None, max_runtime=None,
-                self_resubmit=False, reset_failures=True,
+                self_resubmit=False, reset_failures=True, after_run=None,
                 partition=None, time=None, mem=None, mem_per_cpu=None,
                 cpus_per_task=None, gpus=None, gres=None, account=None,
                 qos=None, constraint=None, exclude=None,
@@ -491,7 +499,7 @@ class TestCmdResumeSlurmOverrides(unittest.TestCase):
 
             args = argparse.Namespace(
                 state_dir=tmpdir, poll_interval=None, max_runtime=None,
-                self_resubmit=False, reset_failures=False,
+                self_resubmit=False, reset_failures=False, after_run=None,
                 partition=None, time="04:00:00", mem=None, mem_per_cpu=None,
                 cpus_per_task=None, gpus=None, gres=None, account=None,
                 qos=None, constraint=None, exclude=None,
@@ -676,6 +684,158 @@ class TestCmdFailures(unittest.TestCase):
             self.assertIn("line2", output)
             self.assertIn("line3", output)
             self.assertNotIn("line1", output)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestCmdSubmitRestart(unittest.TestCase):
+    def setUp(self):
+        logging.getLogger("slurmgrid").handlers = []
+
+    def _base_args(self, tmpdir, restart=False, no_backup=False):
+        import argparse
+        return argparse.Namespace(
+            subcommand="submit",
+            manifest=os.path.join(FIXTURES, "sample_manifest.csv"),
+            command="echo {alpha}",
+            state_dir=tmpdir,
+            delimiter=None,
+            chunk_size=5,
+            max_concurrent=10,
+            max_retries=0,
+            poll_interval=30,
+            max_runtime=None,
+            dry_run=True,
+            partition=None, time=None, mem=None, mem_per_cpu=None,
+            cpus_per_task=1, gpus=None, gres=None, account=None,
+            qos=None, constraint=None, exclude=None,
+            job_name_prefix="sc", extra_sbatch=[], preamble=None,
+            preamble_file=None,
+            no_shuffle=False,
+            after_run=None,
+            self_resubmit=False,
+            serial_chunks=False,
+            restart=restart,
+            no_backup=no_backup,
+            config=None,
+        )
+
+    @patch("slurmgrid.cli.get_max_array_size", return_value=1001)
+    def test_restart_backs_up_state_dir(self, _):
+        with tempfile.TemporaryDirectory() as parent:
+            state_dir = os.path.join(parent, "sc_state")
+            os.makedirs(state_dir)
+            state = new_state(5, 5, 10, 0)
+            save_state(state, state_dir)
+
+            args = self._base_args(state_dir, restart=True)
+            cmd_submit(args)
+
+            # Original state dir should be gone (backed up)
+            backups = [
+                d for d in os.listdir(parent)
+                if d.startswith("sc_state.bak.")
+            ]
+            self.assertEqual(len(backups), 1)
+            # New state dir should exist
+            self.assertTrue(os.path.isfile(
+                os.path.join(state_dir, "state.json"),
+            ))
+
+    @patch("slurmgrid.cli.get_max_array_size", return_value=1001)
+    def test_restart_no_backup_deletes_state_dir(self, _):
+        with tempfile.TemporaryDirectory() as parent:
+            state_dir = os.path.join(parent, "sc_state")
+            os.makedirs(state_dir)
+            state = new_state(5, 5, 10, 0)
+            save_state(state, state_dir)
+
+            args = self._base_args(state_dir, restart=True, no_backup=True)
+            cmd_submit(args)
+
+            backups = [
+                d for d in os.listdir(parent)
+                if d.startswith("sc_state.bak.")
+            ]
+            self.assertEqual(len(backups), 0)
+            self.assertTrue(os.path.isfile(
+                os.path.join(state_dir, "state.json"),
+            ))
+
+
+class TestCmdResumeAfterRun(unittest.TestCase):
+    def setUp(self):
+        logging.getLogger("slurmgrid").handlers = []
+
+    @patch("slurmgrid.cli.run_monitor")
+    def test_after_run_sets_config(self, mock_monitor):
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with tempfile.TemporaryDirectory() as upstream_dir:
+                # Set up upstream state
+                upstream_state = new_state(5, 5, 10, 0)
+                save_state(upstream_state, upstream_dir)
+
+                config = RunConfig(
+                    manifest="/dev/null", command="echo hi",
+                    state_dir=tmpdir, slurm=SlurmConfig(),
+                )
+                from slurmgrid.config import freeze_config
+                freeze_config(config, tmpdir)
+
+                state = new_state(5, 5, 10, 0)
+                state.add_chunk("chunk_000", 5, {"0": 0})
+                save_state(state, tmpdir)
+
+                mock_monitor.return_value = state
+
+                args = argparse.Namespace(
+                    state_dir=tmpdir, poll_interval=None, max_runtime=None,
+                    self_resubmit=False, reset_failures=False,
+                    after_run=upstream_dir,
+                    partition=None, time=None, mem=None, mem_per_cpu=None,
+                    cpus_per_task=None, gpus=None, gres=None, account=None,
+                    qos=None, constraint=None, exclude=None,
+                    job_name_prefix=None, extra_sbatch=[], preamble=None,
+                    preamble_file=None,
+                )
+                cmd_resume(args)
+
+                call_config = mock_monitor.call_args[0][1]
+                self.assertEqual(
+                    call_config.after_run, os.path.abspath(upstream_dir),
+                )
+
+    def test_after_run_missing_state_exits(self):
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with tempfile.TemporaryDirectory() as upstream_dir:
+                config = RunConfig(
+                    manifest="/dev/null", command="echo hi",
+                    state_dir=tmpdir, slurm=SlurmConfig(),
+                )
+                from slurmgrid.config import freeze_config
+                freeze_config(config, tmpdir)
+
+                state = new_state(5, 5, 10, 0)
+                save_state(state, tmpdir)
+
+                args = argparse.Namespace(
+                    state_dir=tmpdir, poll_interval=None, max_runtime=None,
+                    self_resubmit=False, reset_failures=False,
+                    after_run=os.path.join(upstream_dir, "nonexistent"),
+                    partition=None, time=None, mem=None, mem_per_cpu=None,
+                    cpus_per_task=None, gpus=None, gres=None, account=None,
+                    qos=None, constraint=None, exclude=None,
+                    job_name_prefix=None, extra_sbatch=[], preamble=None,
+                    preamble_file=None,
+                )
+                with self.assertRaises(SystemExit):
+                    cmd_resume(args)
 
 
 if __name__ == "__main__":
