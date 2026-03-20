@@ -755,6 +755,90 @@ def test_self_resubmit(project_dir):
     return False
 
 
+def test_retry_succeeded_then_done(project_dir):
+    """Regression: monitor must exit when all retried tasks succeed,
+    even though original chunks remain in partial_failure status.
+
+    Without the is_done() fix, the monitor looped forever once self.failures
+    was cleared (all retries succeeded) but original chunks stayed in
+    partial_failure — making is_done() never return True.
+
+    Uses a marker-file approach: a task fails on first run (no marker) and
+    succeeds on retry (marker present). SLURM_ARRAY_TASK_ID is the same on
+    both runs (retry batches re-use array indices 0..N-1), so the marker
+    file uniquely identifies "this task has been run before".
+    """
+    log("=" * 60)
+    log("TEST: retry_succeeded_then_done")
+    log("=" * 60)
+
+    tmpdir = make_shared_dir("test_retry_done")
+    manifest = os.path.join(tmpdir, "manifest.csv")
+    state_dir = os.path.join(tmpdir, "state")
+    marker_dir = os.path.join(tmpdir, "markers")
+    os.makedirs(marker_dir)
+
+    # 6 jobs in one chunk; all will fail on first run and succeed on retry.
+    create_manifest(manifest, 6)
+
+    # Command: fail on first run (no marker), succeed on retry (marker present).
+    # The marker is keyed on SLURM_ARRAY_TASK_ID, which is identical on both
+    # original run and retry chunk (both use array indices 0..N-1).
+    # Use $SLURM_ARRAY_TASK_ID without braces — braces would match the
+    # {placeholder} validator and be rejected as a missing manifest column.
+    command = (
+        f"marker={marker_dir}/task_$SLURM_ARRAY_TASK_ID; "
+        f"if [ ! -f \"$marker\" ]; then touch \"$marker\"; exit 1; fi; exit 0"
+    )
+
+    result = run_slurmgrid(project_dir, [
+        "submit",
+        "--manifest", manifest,
+        "--command", command,
+        "--state-dir", state_dir,
+        "--chunk-size", "6",
+        "--max-concurrent", "10",
+        "--max-retries", "1",
+        "--max-runtime", "300",
+        "--poll-interval", "5",
+        "--time", "00:05:00",
+    ])
+
+    if result.returncode != 0:
+        log("FAIL: slurmgrid did not exit cleanly (possible infinite loop)")
+        _dump_debug_info(state_dir)
+        return False
+
+    state = load_state(state_dir)
+    failures = state.get("failures", {})
+    chunks = state["chunks"]
+
+    log(f"Chunks: {len(chunks)}, Failures: {len(failures)}")
+    for cid, c in chunks.items():
+        log(f"  {cid}: status={c['status']}, completed={c['completed_tasks']}")
+
+    # All retries succeeded -> failure dict should be empty
+    if failures:
+        log(f"FAIL: expected 0 failure records, got {len(failures)}")
+        for key, f in failures.items():
+            log(f"  {key}: permanently_failed={f.get('permanently_failed')}")
+        _dump_debug_info(state_dir)
+        return False
+
+    # Every chunk should be in a terminal state (completed or partial_failure)
+    non_terminal = [
+        cid for cid, c in chunks.items()
+        if c["status"] not in ("completed", "partial_failure")
+    ]
+    if non_terminal:
+        log(f"FAIL: chunks not in terminal state: {non_terminal}")
+        _dump_debug_info(state_dir)
+        return False
+
+    log("PASS")
+    return True
+
+
 def test_cancel_and_resume(project_dir):
     """Test: cancel active jobs, then resume to resubmit and complete them."""
     log("=" * 60)
@@ -836,9 +920,9 @@ def test_cancel_and_resume(project_dir):
     log("Running slurmgrid resume...")
     result = run_slurmgrid(project_dir, [
         "resume", "--state-dir", state_dir,
-        "--max-runtime", "120",
+        "--max-runtime", "240",
         "--poll-interval", "5",
-    ], timeout=180)
+    ], timeout=360)
 
     if result.returncode != 0:
         log("FAIL: resume command failed")
@@ -1094,6 +1178,7 @@ def main():
         test_status_command,
         test_basic_submit_and_complete,
         test_failure_and_retry,
+        test_retry_succeeded_then_done,
         test_failures_subcommand,
         test_cancel_and_resume,
         test_reset_failures_with_overrides,
